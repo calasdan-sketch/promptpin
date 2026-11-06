@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from promptpin import registry
+from promptpin import registry, safety
 from promptpin.config import Config
 from promptpin.errors import InvalidPromptError
 
@@ -38,8 +38,42 @@ class Finding:
         return f"[{self.level}] {self.prompt}: {self.message}"
 
 
+def _hidden_findings(prompt: registry.Prompt) -> list[Finding]:
+    fields = {
+        "template": prompt.template,
+        "description": prompt.description,
+        "model": prompt.model,
+    }
+    for key, value in (prompt.params or {}).items():
+        if isinstance(value, str):
+            fields[f"params.{key}"] = value
+    findings = []
+    for field_name, text in fields.items():
+        hits = safety.find_hidden(text or "")
+        if not hits:
+            continue
+        for severity in ("error", "warning"):
+            group = [h for h in hits if h.severity == severity]
+            if not group:
+                continue
+            line = (text[: group[0].index].count("\n")) + 1
+            shown = ", ".join(sorted({h.label for h in group})[:3])
+            more = f" (+{len(group) - 3} more)" if len(group) > 3 else ""
+            kinds = "/".join(sorted({h.kind for h in group}))
+            findings.append(
+                Finding(
+                    severity,
+                    prompt.name,
+                    f"{len(group)} invisible {kinds} character(s) in {field_name}"
+                    f" (first on line {line}): {shown}{more} — reviewers cannot see these,"
+                    " models can",
+                )
+            )
+    return findings
+
+
 def validate_prompt(prompt: registry.Prompt) -> list[Finding]:
-    findings: list[Finding] = []
+    findings: list[Finding] = _hidden_findings(prompt)
     declared = set(prompt.variables)
     used = set(prompt.template_variables())
     for var in sorted(used - declared):
@@ -78,15 +112,29 @@ def validate_all(repo_root: Path) -> list[Finding]:
     top = gitutil.ensure_repo(repo_root)
     cfg = Config.load(top)
     findings: list[Finding] = []
-    for name in registry.list_prompts(top, cfg.prompts_dir):
+    names = registry.list_prompts(top, cfg.prompts_dir)
+    if not names:
+        # Fail closed: a CI gate that checks zero prompts must not pass.
+        return [
+            Finding(
+                "error",
+                "-",
+                f"no prompts found in {cfg.prompts_dir}/ — nothing to validate"
+                " (wrong prompts_dir in promptpin.yaml?)",
+            )
+        ]
+    for name in names:
         try:
             prompt = registry.load_prompt(top, cfg.prompts_dir, name)
-        except InvalidPromptError as exc:
+        except (InvalidPromptError, UnicodeDecodeError) as exc:
             findings.append(Finding("error", name, str(exc)))
             continue
         findings.extend(validate_prompt(prompt))
     return findings
 
 
-def is_clean(findings: list[Finding]) -> bool:
+def is_clean(findings: list[Finding], strict: bool = False) -> bool:
+    """True when no errors (with ``strict``, no warnings either)."""
+    if strict:
+        return not findings
     return not any(f.level == "error" for f in findings)

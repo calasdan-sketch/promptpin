@@ -9,7 +9,7 @@ from __future__ import annotations
 import difflib
 from pathlib import Path
 
-from promptpin import deploys, gitutil, statedb
+from promptpin import deploys, gitutil, safety, statedb
 from promptpin.config import Config
 from promptpin.registry import Prompt
 
@@ -28,8 +28,10 @@ def load_at(top: Path, name: str, ref: str) -> tuple[Prompt, str, str]:
 
 def text_diff(a: Prompt, b: Prompt, a_label: str, b_label: str) -> str:
     lines = difflib.unified_diff(
-        a.template.splitlines(),
-        b.template.splitlines(),
+        # split("\n"), not splitlines(): splitlines() also breaks on U+2028,
+        # \x1c etc., which would make those characters vanish from the diff.
+        a.template.split("\n"),
+        b.template.split("\n"),
         fromfile=f"{a.name}@{a_label}",
         tofile=f"{b.name}@{b_label}",
         lineterm="",
@@ -42,6 +44,8 @@ def config_diff(a: Prompt, b: Prompt) -> list[tuple[str, str, str]]:
     changes = []
     if a.model != b.model:
         changes.append(("model", a.model or "(unset)", b.model or "(unset)"))
+    if a.format != b.format:
+        changes.append(("format", a.format, b.format))
     if a.description != b.description:
         changes.append(("description", a.description or "(unset)", b.description or "(unset)"))
     params_a = a.params or {}
@@ -101,14 +105,25 @@ def render_diff(
     def paint(code: str, s: str) -> str:
         return f"\033[{code}m{s}\033[0m" if color else s
 
+    one = safety.one_line
     out: list[str] = []
-    out.append(f"promptpin diff {name}: {disp_a} ({sha_a[:7]}) → {disp_b} ({sha_b[:7]})")
+    out.append(f"promptpin diff {name}: {one(disp_a)} ({sha_a[:7]}) → {one(disp_b)} ({sha_b[:7]})")
+    hidden_a, hidden_b = safety.find_hidden(a.template), safety.find_hidden(b.template)
+    if len(hidden_b) > len(hidden_a):
+        out.append(
+            paint(
+                "33",
+                f"⚠ {one(disp_b)} adds {len(hidden_b) - len(hidden_a)} invisible character(s);"
+                " they are shown below as \\uXXXX escapes",
+            )
+        )
     out.append("")
 
     out.append("=== template ===")
     td = text_diff(a, b, disp_a, disp_b)
     if td:
-        for line in td.splitlines():
+        for line in td.split("\n"):
+            line = one(line)
             if line.startswith("+") and not line.startswith("+++"):
                 out.append(paint("32", line))
             elif line.startswith("-") and not line.startswith("---"):
@@ -123,7 +138,7 @@ def render_diff(
     changes = config_diff(a, b)
     if changes:
         for field_name, old, new in changes:
-            out.append(f"  {field_name}: {paint('31', old)} → {paint('32', new)}")
+            out.append(f"  {field_name}: {paint('31', one(old))} → {paint('32', one(new))}")
     else:
         out.append("(config identical)")
     out.append("")
@@ -141,5 +156,5 @@ def render_diff(
             prov = ""
             if r["a"] and r["b"] and not r["provenance_match"]:
                 prov = "  ⚠ different suite/dataset — not comparable"
-            out.append(f"  {r['metric']}: {a_v} → {b_v} (Δ {d}){prov}")
+            out.append(f"  {one(r['metric'])}: {a_v} → {b_v} (Δ {d}){prov}")
     return "\n".join(out)

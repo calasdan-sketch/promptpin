@@ -7,7 +7,7 @@ import datetime
 import sys
 from pathlib import Path
 
-from promptpin import deploys, gitutil, registry, statedb
+from promptpin import deploys, gitutil, registry, safety, statedb
 from promptpin import diff as diffmod
 from promptpin import validate as validatemod
 from promptpin.config import (
@@ -17,6 +17,19 @@ from promptpin.config import (
     Config,
 )
 from promptpin.errors import PromptpinError
+
+
+def _say(text: object = "") -> None:
+    """Print with control/bidi/zero-width characters made visible.
+
+    Everything promptpin prints can contain untrusted text (prompt bodies,
+    notes, commit messages, author names), so nothing reaches the terminal
+    raw.
+    """
+    print(safety.sanitize(text))
+
+
+_one = safety.one_line
 
 
 def _repo(args) -> Path:
@@ -42,7 +55,7 @@ def cmd_init(args) -> int:
     if not cfg_path.exists():
         cfg = Config()
         cfg_path.write_text(cfg.dump(), encoding="utf-8")
-        print(f"wrote {CONFIG_FILENAME}")
+        _say(f"wrote {CONFIG_FILENAME}")
     prompts_dir = top / Config.load(top).prompts_dir
     prompts_dir.mkdir(parents=True, exist_ok=True)
     example = prompts_dir / "greeter.yaml"
@@ -59,21 +72,21 @@ def cmd_init(args) -> int:
             "  Greet {{user_name}} warmly in one short sentence.\n",
             encoding="utf-8",
         )
-        print(f"wrote example {example.relative_to(top)}")
+        _say(f"wrote example {example.relative_to(top)}")
     gitignore = top / ".gitignore"
     entry = f"{STATE_DIRNAME}/\n"
     if gitignore.exists():
         if entry not in gitignore.read_text(encoding="utf-8"):
             with open(gitignore, "a", encoding="utf-8") as fh:
                 fh.write(entry)
-            print(f"added {STATE_DIRNAME}/ to .gitignore")
+            _say(f"added {STATE_DIRNAME}/ to .gitignore")
     else:
         gitignore.write_text(entry, encoding="utf-8")
-        print("wrote .gitignore")
-    print("\nnext steps:")
-    print("  1. edit prompts/greeter.yaml, then: git add -A && git commit -m 'add greeter'")
-    print("  2. promptpin release greeter            # tags promptpin/greeter@v1")
-    print("  3. promptpin deploy greeter@v1 --env staging")
+        _say("wrote .gitignore")
+    _say("\nnext steps:")
+    _say("  1. edit prompts/greeter.yaml, then: git add -A && git commit -m 'add greeter'")
+    _say("  2. promptpin release greeter            # tags promptpin/greeter@v1")
+    _say("  3. promptpin deploy greeter@v1 --env staging")
     return 0
 
 
@@ -85,15 +98,15 @@ def cmd_list(args) -> int:
     cfg = Config.load(top)
     names = registry.list_prompts(top, cfg.prompts_dir)
     if not names:
-        print(f"no prompts in {cfg.prompts_dir}/ yet — run `promptpin init`")
+        _say(f"no prompts in {cfg.prompts_dir}/ yet — run `promptpin init`")
         return 0
     for name in names:
         try:
             prompt = registry.load_prompt(top, cfg.prompts_dir, name)
             latest = gitutil.latest_tag(top, name)
-            print(f"{name:24} {prompt.model or '(no model)':20} latest={latest or '(unreleased)'}")
+            _say(f"{name:24} {prompt.model or '(no model)':20} latest={latest or '(unreleased)'}")
         except PromptpinError as exc:
-            print(f"{name:24} ERROR: {exc}")
+            _say(f"{name:24} ERROR: {exc}")
     return 0
 
 
@@ -104,11 +117,11 @@ def cmd_versions(args) -> int:
     top = _repo(args)
     tags = gitutil.list_version_tags(top, args.name)
     if not tags:
-        print(f"no released versions of {args.name!r} — run `promptpin release {args.name}`")
+        _say(f"no released versions of {args.name!r} — run `promptpin release {args.name}`")
         return 0
     for tag in tags:
         sha, _ = gitutil.resolve_ref(top, tag)
-        print(f"{tag.rsplit('@', 1)[-1]:6} {tag:40} {sha[:7]}")
+        _say(f"{tag.rsplit('@', 1)[-1]:6} {tag:40} {sha[:7]}")
     return 0
 
 
@@ -119,21 +132,37 @@ def cmd_show(args) -> int:
     top = _repo(args)
     name, ref = _parse_name_ref(args.spec) if "@" in args.spec else (args.spec, "latest")
     prompt, sha, display = diffmod.load_at(top, name, ref)
-    variables = dict(kv.split("=", 1) for kv in (args.var or []))
-    template = prompt.template
-    if variables:
-        from promptpin.client import render_template
-
-        try:
-            template = render_template(template, variables)
-        except KeyError as exc:
-            raise PromptpinError(str(exc)) from exc
-    print(f"# {prompt.name} @ {display} ({sha[:7]})")
+    variables = {}
+    for kv in args.var or []:
+        key, sep, value = kv.partition("=")
+        if not sep or not key:
+            raise PromptpinError(f"bad --var {kv!r}: expected name=value")
+        variables[key] = value
+    _say(f"# {prompt.name} @ {display} ({sha[:7]})")
     if prompt.description:
-        print(f"# {prompt.description}")
-    print(f"# model={prompt.model or '(unset)'} params={prompt.params or {}}")
-    print()
-    print(template)
+        _say(f"# {_one(prompt.description)}")
+    _say(f"# model={_one(prompt.model or '(unset)')} params={prompt.params or {}}")
+    if prompt.format == "chat":
+        _say("# format=chat")
+    _say()
+    from promptpin.client import render_messages, render_template
+
+    try:
+        if prompt.format == "chat":
+            messages = (
+                render_messages(prompt.template, variables)
+                if variables
+                else registry.split_messages(prompt.template)
+            )
+            for i, m in enumerate(messages):
+                if i:
+                    _say()
+                _say(f"[{m['role']}]")
+                _say(m["content"])
+        else:
+            _say(render_template(prompt.template, variables) if variables else prompt.template)
+    except KeyError as exc:
+        raise PromptpinError(str(exc).strip("'\"")) from exc
     return 0
 
 
@@ -152,16 +181,61 @@ def cmd_diff(args) -> int:
 def cmd_validate(args) -> int:
     top = _repo(args)
     findings = validatemod.validate_all(top)
+    ok = validatemod.is_clean(findings, strict=args.strict)
+    if args.json:
+        import json
+
+        payload = {
+            "ok": ok,
+            "strict": args.strict,
+            "findings": [
+                {"level": f.level, "prompt": f.prompt, "message": f.message} for f in findings
+            ],
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=True))
+        return 0 if ok else 1
     if not findings:
-        print("all prompts valid")
+        _say("all prompts valid")
         return 0
     for finding in findings:
-        print(finding)
-    if not validatemod.is_clean(findings):
-        print("\nvalidation FAILED (errors above)")
+        _say(finding)
+    if not ok:
+        reason = "errors above" if not validatemod.is_clean(findings) else "--strict: warnings"
+        _say(f"\nvalidation FAILED ({reason})")
         return 1
-    print("\nvalid with warnings")
+    _say("\nvalid with warnings")
     return 0
+
+
+# ---------------------------------------------------------------- verify ---
+
+
+def cmd_verify(args) -> int:
+    top = _repo(args)
+    checks = deploys.verify_lock(
+        top, env=args.env, bundle_dir=Path(args.bundle) if args.bundle else None
+    )
+    errors = [c for c in checks if c.level == "error"]
+    warnings = [c for c in checks if c.level == "warning"]
+    ok = not errors and not (args.strict and warnings)
+    if args.json:
+        import json
+
+        payload = {"ok": ok, "strict": args.strict, "checks": [c.to_mapping() for c in checks]}
+        print(json.dumps(payload, indent=2, ensure_ascii=True))
+        return 0 if ok else 1
+    for c in checks:
+        where = f"{c.env}/{c.prompt}" if c.prompt != "-" else c.env
+        _say(f"[{c.level}] {_one(where)}: {_one(c.message)}")
+    pins = deploys.read_lock(top) if (top / LOCK_FILENAME).exists() and not errors else {}
+    n = sum(len(v) for e, v in pins.items() if args.env in (None, e))
+    if ok:
+        _say(f"verified {n} pin(s): every pin re-derived from git matches {LOCK_FILENAME}")
+        if warnings:
+            _say(f"({len(warnings)} warning(s) above)")
+        return 0
+    _say(f"\nverify FAILED ({len(errors)} error(s), {len(warnings)} warning(s))")
+    return 1
 
 
 # --------------------------------------------------------------- release ---
@@ -176,7 +250,7 @@ def cmd_release(args) -> int:
     rel = registry.prompt_relpath(top, cfg.prompts_dir, args.name) or ""
     dirty = [line[3:] for line in gitutil.status_porcelain(top).splitlines() if len(line) > 3]
     if rel and rel in dirty:
-        print(
+        _say(
             f"⚠ warning: {rel} has uncommitted changes — this release will NOT include them.\n"
             "  Commit first, or the tag will point at the old version."
         )
@@ -189,13 +263,15 @@ def cmd_release(args) -> int:
             gitutil.show_file(top, sha, candidate)
             rel = candidate
             break
-        except Exception:
+        except PromptpinError:
             continue
     if rel is None:
         raise PromptpinError(
             f"prompt {args.name!r} has no file in {cfg.prompts_dir}/ at {sha[:7]} — "
             "commit the prompt file first"
         )
+    if args.as_ and not gitutil.is_version_label(args.as_):
+        raise PromptpinError(f"--as {args.as_!r}: version labels must look like v4 (or 4)")
     version = args.as_ or gitutil.next_version(top, args.name)
     tag = gitutil.tag_name(args.name, version)
     existing = gitutil.list_version_tags(top, args.name)
@@ -203,10 +279,10 @@ def cmd_release(args) -> int:
         raise PromptpinError(f"{tag} already exists — pass --as vN for a new version")
     message = args.message or f"release {args.name} {version}"
     gitutil.create_tag(top, args.name, version, sha, message)
-    print(f"released {args.name}@{version} → {tag} ({sha[:7]})")
+    _say(f"released {args.name}@{version} → {tag} ({sha[:7]})")
     if prompt.model:
-        print(f"  model={prompt.model} params={prompt.params or {}}")
-    print(f"deploy it: promptpin deploy {args.name}@{version} --env <env>")
+        _say(f"  model={prompt.model} params={prompt.params or {}}")
+    _say(f"deploy it: promptpin deploy {args.name}@{version} --env <env>")
     return 0
 
 
@@ -224,20 +300,20 @@ def cmd_deploy(args) -> int:
         note=args.note or "",
         commit=(not args.no_commit),
     )
-    print(f"pinned {name}@{result['display_ref']} → {sha7(result['sha'])} on {args.env}")
+    _say(f"pinned {name}@{result['display_ref']} → {sha7(result['sha'])} on {args.env}")
     if result["previous_sha"]:
-        print(f"  previous: {sha7(result['previous_sha'])}")
+        _say(f"  previous: {sha7(result['previous_sha'])}")
     else:
-        print("  previous: (none — first deploy)")
+        _say("  previous: (none — first deploy)")
     if result["model"]:
-        print(f"  model={result['model']}")
+        _say(f"  model={result['model']}")
     if result["mutable_ref"]:
-        print("  ⚠ MUTABLE REF: the ref can move — the pin is frozen at the SHA above.")
-        print("    Prefer tags/SHAs for production deploys.")
+        _say("  ⚠ MUTABLE REF: the ref can move — the pin is frozen at the SHA above.")
+        _say("    Prefer tags/SHAs for production deploys.")
     if result["commit_sha"]:
-        print(f"  committed {LOCK_FILENAME} as {sha7(result['commit_sha'])}")
+        _say(f"  committed {LOCK_FILENAME} as {sha7(result['commit_sha'])}")
     else:
-        print(f"  (not committed — {LOCK_FILENAME} has uncommitted changes)")
+        _say(f"  (not committed — {LOCK_FILENAME} has uncommitted changes)")
     return 0
 
 
@@ -251,10 +327,10 @@ def sha7(sha: str) -> str:
 def cmd_rollback(args) -> int:
     top = _repo(args)
     result = deploys.rollback(top, args.name, args.env, note=args.note or "")
-    print(f"rolled back {args.name} on {args.env} → {sha7(result['sha'])}")
-    print(f"  (was {sha7(result['rolled_back_from'])})")
+    _say(f"rolled back {args.name} on {args.env} → {sha7(result['sha'])}")
+    _say(f"  (was {sha7(result['rolled_back_from'])})")
     if result["commit_sha"]:
-        print(f"  committed {LOCK_FILENAME} as {sha7(result['commit_sha'])}")
+        _say(f"  committed {LOCK_FILENAME} as {sha7(result['commit_sha'])}")
     return 0
 
 
@@ -265,26 +341,27 @@ def cmd_status(args) -> int:
     top = _repo(args)
     pins = deploys.read_lock(top)
     if not pins:
-        print(f"nothing deployed yet — {LOCK_FILENAME} is empty or missing")
+        _say(f"nothing deployed yet — {LOCK_FILENAME} is empty or missing")
         return 0
     envs = [args.env] if args.env else sorted(pins)
     for env in envs:
         prompts = pins.get(env, {})
         if not prompts:
             continue
-        print(f"## {env}")
+        _say(f"## {env}")
         for name in sorted(prompts):
             pin = prompts[name]
             flag = " ⚠MUTABLE" if pin.mutable_ref else ""
-            print(
-                f"  {name:24} {pin.ref:12} {sha7(pin.sha)}"
-                f"  {pin.model or '(no model)':18} by {pin.deployed_by} {pin.deployed_at}{flag}"
+            _say(
+                f"  {name:24} {_one(pin.ref):12} {sha7(pin.sha)}"
+                f"  {_one(pin.model or '(no model)'):18} by {_one(pin.deployed_by)}"
+                f" {_one(pin.deployed_at)}{flag}"
             )
     issues = deploys.status_issues(top, pins)
     if issues:
-        print("\nissues:")
+        _say("\nissues:")
         for issue in issues:
-            print(f"  ⚠ {issue}")
+            _say(f"  ⚠ {issue}")
     return 0
 
 
@@ -299,7 +376,7 @@ def cmd_history(args) -> int:
     finally:
         conn.close()
     if not rows:
-        print("no deploys recorded in the local ledger")
+        _say("no deploys recorded in the local ledger")
         return 0
     for r in rows:
         ts = datetime.datetime.fromtimestamp(r["ts"], datetime.timezone.utc).strftime(
@@ -307,10 +384,10 @@ def cmd_history(args) -> int:
         )
         mut = " ⚠MUTABLE" if r["mutable_ref"] else ""
         prev = f" (was {r['previous_sha'][:7]})" if r["previous_sha"] else ""
-        note = f" — {r['note']}" if r["note"] else ""
-        print(
-            f"{ts}  {r['env']:12} {r['prompt']:20} {r['ref']:24}"
-            f" → {r['resolved_sha'][:7]}{prev} by {r['actor']}{mut}{note}"
+        note = f" — {_one(r['note'])}" if r["note"] else ""
+        _say(
+            f"{ts}  {_one(r['env']):12} {r['prompt']:20} {_one(r['ref']):24}"
+            f" → {r['resolved_sha'][:7]}{prev} by {_one(r['actor'])}{mut}{note}"
         )
     return 0
 
@@ -341,15 +418,15 @@ def cmd_lock(args) -> int:
     }
     out = Path(args.out)
     out.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
-    print(f"wrote {out} ({len(prompts)} prompts for {args.env})")
+    _say(f"wrote {out} ({len(prompts)} prompts for {args.env})")
     return 0
 
 
 def cmd_export(args) -> int:
     top = _repo(args)
     result = deploys.export_bundle(top, args.env, Path(args.out))
-    print(f"exported {len(result['prompts'])} prompts for {args.env} → {result['out']}/")
-    print("bundle with your app; load with promptpin.load_bundle(<dir>)")
+    _say(f"exported {len(result['prompts'])} prompts for {args.env} → {result['out']}/")
+    _say("bundle with your app; load with promptpin.load_bundle(<dir>)")
     return 0
 
 
@@ -361,7 +438,7 @@ def _parse_duration(s: str) -> float:
 
     now = _time.time()
     units = {"m": 60, "h": 3600, "d": 86400, "w": 604800}
-    if s[-1] in units and s[:-1].isdigit():
+    if s and s[-1] in units and s[:-1].isdigit():
         return now - int(s[:-1]) * units[s[-1]]
     raise PromptpinError(f"could not parse duration {s!r} — use e.g. 24h, 7d, 30m")
 
@@ -385,7 +462,7 @@ def cmd_log(args) -> int:
             )
         finally:
             conn.close()
-        print("logged")
+        _say("logged")
         return 0
     if args.log_cmd == "stats":
         conn = statedb.connect(top)
@@ -394,10 +471,10 @@ def cmd_log(args) -> int:
             stats = statedb.serving_stats(conn, prompt=args.prompt, env=args.env, since_ts=since)
         finally:
             conn.close()
-        print(f"serving events: {stats['total']}")
+        _say(f"serving events: {stats['total']}")
         for v in stats["versions"]:
             lat = f"{v['avg_latency_ms']:.1f}ms" if v["avg_latency_ms"] is not None else "n/a"
-            print(
+            _say(
                 f"  {v['sha'][:7]}  {v['model'] or '(no model)':18}"
                 f"  n={v['count']} ({v['share']:.0%})  avg_latency={lat}"
                 f"  error_rate={v['error_rate']:.1%}"
@@ -410,7 +487,7 @@ def cmd_log(args) -> int:
             n = statedb.prune_serving(conn, cutoff)
         finally:
             conn.close()
-        print(f"pruned {n} serving events older than {args.older_than}")
+        _say(f"pruned {n} serving events older than {args.older_than}")
         return 0
     raise PromptpinError(f"unknown log subcommand {args.log_cmd!r}")
 
@@ -454,7 +531,7 @@ def cmd_eval(args) -> int:
                 )
         finally:
             conn.close()
-        print(
+        _say(
             f"recorded {len(metrics)} metric(s) for {args.prompt}@{display}"
             f" ({sha[:7]}) from suite {args.suite!r}"
         )
@@ -470,18 +547,18 @@ def cmd_evals(args) -> int:
     finally:
         conn.close()
     if not rows:
-        print(f"no evals recorded for {args.name!r}")
+        _say(f"no evals recorded for {args.name!r}")
         return 0
     for r in rows:
         ts = datetime.datetime.fromtimestamp(r["ts"], datetime.timezone.utc).strftime(
             "%Y-%m-%d %H:%M UTC"
         )
-        note = f" — {r['note']}" if r["note"] else ""
-        print(
-            f"{ts}  {r['ref']:14} {r['resolved_sha'][:7]}"
-            f"  {r['metric']}={r['value']:.4g}"
-            f"  suite={r['suite']} dataset={r['dataset_sha'][:7]}"
-            f"  by {r['recorded_by']}{note}"
+        note = f" — {_one(r['note'])}" if r["note"] else ""
+        _say(
+            f"{ts}  {_one(r['ref']):14} {r['resolved_sha'][:7]}"
+            f"  {_one(r['metric'])}={r['value']:.4g}"
+            f"  suite={_one(r['suite'])} dataset={_one(r['dataset_sha'][:7])}"
+            f"  by {_one(r['recorded_by'])}{note}"
         )
     return 0
 
@@ -497,10 +574,11 @@ def cmd_audit(args) -> int:
         rel = registry.prompt_relpath(top, cfg.prompts_dir, name)
         if rel is None:
             continue
-        print(f"## {name} ({rel})")
+        _say(f"## {name} ({rel})")
         for entry in gitutil.file_history(top, rel, limit=10):
-            print(
-                f"  {entry['date'][:10]} {entry['sha'][:7]} {entry['author']:20} {entry['message']}"
+            _say(
+                f"  {entry['date'][:10]} {entry['sha'][:7]} {_one(entry['author']):20}"
+                f" {_one(entry['message'])}"
             )
     conn = statedb.connect(top)
     try:
@@ -508,14 +586,14 @@ def cmd_audit(args) -> int:
     finally:
         conn.close()
     if rows:
-        print("\n## recent deploys")
+        _say("\n## recent deploys")
         for r in rows:
             ts = datetime.datetime.fromtimestamp(r["ts"], datetime.timezone.utc).strftime(
                 "%Y-%m-%d"
             )
-            print(
+            _say(
                 f"  {ts} {r['env']:12} {r['prompt']:20} {r['ref']:20}"
-                f" → {r['resolved_sha'][:7]} by {r['actor']}"
+                f" → {r['resolved_sha'][:7]} by {_one(r['actor'])}"
             )
     return 0
 
@@ -554,8 +632,22 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--color", action="store_true")
     s.set_defaults(func=cmd_diff)
 
-    s = sub.add_parser("validate", help="schema + variable + best-effort secret checks")
+    s = sub.add_parser(
+        "validate", help="schema, variable, hidden-character and best-effort secret checks"
+    )
+    s.add_argument("--strict", action="store_true", help="fail on warnings too")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
     s.set_defaults(func=cmd_validate)
+
+    s = sub.add_parser(
+        "verify",
+        help="CI gate: re-derive every pin from git and check it matches promptpin.lock",
+    )
+    s.add_argument("--env", help="only this env")
+    s.add_argument("--bundle", help="also check an exported bundle dir matches the pins")
+    s.add_argument("--strict", action="store_true", help="fail on warnings too")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
+    s.set_defaults(func=cmd_verify)
 
     s = sub.add_parser("release", help="tag the current (or given) commit as a version")
     s.add_argument("name")
@@ -651,10 +743,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.func(args)
     except PromptpinError as exc:
-        print(f"promptpin: error: {exc}", file=sys.stderr)
+        print(f"promptpin: error: {safety.sanitize(exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         return 130
+    except BrokenPipeError:
+        # `promptpin diff ... | head` — the reader went away; exit quietly.
+        import os
+
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+        return 141
 
 
 if __name__ == "__main__":

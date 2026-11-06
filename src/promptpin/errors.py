@@ -27,3 +27,7 @@ class DeployError(PromptpinError):
 
 class LockError(PromptpinError):
     """Raised when the deploy lock cannot be acquired."""
+
+
+class ConfigError(PromptpinError, ValueError):
+    """Raised when ``promptpin.yaml`` is invalid (also a ValueError, for compatibility)."""

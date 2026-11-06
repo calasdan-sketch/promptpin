@@ -21,7 +21,7 @@ from re import Match
 import yaml
 
 from promptpin import statedb
-from promptpin.registry import VARIABLE_RE
+from promptpin.registry import VARIABLE_RE, is_valid_name, split_messages
 
 
 def resolve(lock_path: str | Path, env: str, prompt: str) -> dict:
@@ -66,17 +66,33 @@ def load_bundle(bundle_dir: str | Path) -> dict:
             f"{manifest_path} not found — is this a `promptpin export` directory?"
         )
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    prompts = manifest.get("prompts") if isinstance(manifest, dict) else None
+    if not isinstance(prompts, dict) or not prompts:
+        # Fail closed: an empty or malformed bundle must not "load" as zero prompts.
+        raise ValueError(f"{manifest_path}: no prompts in bundle manifest — re-export the bundle")
     result = {}
-    for name, meta in (manifest.get("prompts") or {}).items():
-        template = (bundle_dir / meta["file"]).read_text(encoding="utf-8")
-        digest = hashlib.sha256(template.encode("utf-8")).hexdigest()
-        if digest != meta["template_sha256"]:
+    for name, meta in prompts.items():
+        if not is_valid_name(name) or not isinstance(meta, dict):
+            raise ValueError(f"{manifest_path}: invalid bundle entry {name!r}")
+        expected_file = f"{name}.template.md"
+        if meta.get("file") != expected_file:
+            # The manifest is data; never let it point outside the bundle.
+            raise ValueError(
+                f"{manifest_path}: entry {name!r} must reference {expected_file!r},"
+                f" got {meta.get('file')!r}"
+            )
+        expected_hash = meta.get("template_sha256")
+        if not isinstance(expected_hash, str) or len(expected_hash) != 64:
+            raise ValueError(f"{manifest_path}: entry {name!r} has no valid template_sha256")
+        raw = (bundle_dir / expected_file).read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if digest != expected_hash:
             raise ValueError(
                 f"bundle template for {name!r} does not match the pinned sha256 "
-                f"(expected {meta['template_sha256'][:12]}…, got {digest[:12]}…) — "
+                f"(expected {expected_hash[:12]}…, got {digest[:12]}…) — "
                 "re-export the bundle"
             )
-        result[name] = {**meta, "template": template}
+        result[name] = {"format": "text", **meta, "template": raw.decode("utf-8")}
     return result
 
 
@@ -92,6 +108,27 @@ def render_template(template: str, variables: dict | None = None, **kwargs) -> s
         return str(values[name])
 
     return VARIABLE_RE.sub(replace, template)
+
+
+def render_messages(template: str, variables: dict | None = None, **kwargs) -> list[dict]:
+    """Render a ``format: chat`` template into ``[{"role", "content"}]``.
+
+    The template is split into messages *before* variables are substituted,
+    so a variable value containing a line like ``system:`` stays inside its
+    message — user input cannot forge a new role. Missing variables raise
+    KeyError; a malformed chat template raises ValueError.
+    """
+    return [
+        {"role": m["role"], "content": render_template(m["content"], variables, **kwargs)}
+        for m in split_messages(template)
+    ]
+
+
+def render(entry: dict, variables: dict | None = None, **kwargs) -> str | list[dict]:
+    """Render a ``load_bundle`` entry: a string for text prompts, messages for chat."""
+    if entry.get("format") == "chat":
+        return render_messages(entry["template"], variables, **kwargs)
+    return render_template(entry["template"], variables, **kwargs)
 
 
 def log_serve(

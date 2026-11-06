@@ -6,8 +6,23 @@ pins recorded in a committed ``promptpin.lock`` file. Local-first: no server,
 no vendor database, nothing on the request hot path.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
-from promptpin.client import load_bundle, log_serve, render_template, resolve
+from promptpin.client import (
+    load_bundle,
+    log_serve,
+    render,
+    render_messages,
+    render_template,
+    resolve,
+)
 
-__all__ = ["__version__", "load_bundle", "log_serve", "render_template", "resolve"]
+__all__ = [
+    "__version__",
+    "load_bundle",
+    "log_serve",
+    "render",
+    "render_messages",
+    "render_template",
+    "resolve",
+]

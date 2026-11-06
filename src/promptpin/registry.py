@@ -6,7 +6,19 @@ Two formats, one data model::
     prompts/summarizer.md       # YAML frontmatter + Markdown body
 
 Required fields: ``name``, ``template``.
-Optional: ``description``, ``model``, ``params`` (mapping), ``variables`` (list).
+Optional: ``description``, ``model``, ``params`` (mapping), ``variables`` (list),
+``format`` (``text`` — the default — or ``chat``).
+
+Chat prompts (``format: chat``) keep the template a single string — so
+hashing, diffs, blame and bundles work exactly as for text prompts — and mark
+messages with a role line, one of ``system:``, ``developer:``, ``user:`` or
+``assistant:`` alone on its line::
+
+    system:
+    You are a terse support agent.
+
+    user:
+    {{ticket_text}}
 """
 
 from __future__ import annotations
@@ -23,6 +35,39 @@ from promptpin.errors import InvalidPromptError, PromptNotFoundError
 PROMPTS_DIRNAME = "prompts"
 FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*\r?\n(.*)\Z", re.DOTALL)
 VARIABLE_RE = re.compile(r"\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}")
+#: Valid prompt names. Names become file names and git tag components, so
+#: no path separators, dots-only names, or leading dashes.
+NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+#: Chat role marker: a role name alone on its own line.
+ROLE_RE = re.compile(r"^[ \t]*(system|developer|user|assistant)[ \t]*:[ \t]*\r?$", re.MULTILINE)
+FORMATS = ("text", "chat")
+
+
+def is_valid_name(name: object) -> bool:
+    return isinstance(name, str) and NAME_RE.fullmatch(name) is not None
+
+
+def split_messages(template: str) -> list[dict]:
+    """Split a chat template into ``[{"role", "content"}]`` (unrendered).
+
+    Raises ValueError when there is no role marker, when non-blank text
+    precedes the first marker, or when a message is empty.
+    """
+    markers = list(ROLE_RE.finditer(template))
+    if not markers:
+        raise ValueError(
+            "chat prompt has no role markers — start messages with a line like 'system:'"
+        )
+    if template[: markers[0].start()].strip():
+        raise ValueError("chat prompt has text before the first role marker")
+    messages = []
+    for i, m in enumerate(markers):
+        end = markers[i + 1].start() if i + 1 < len(markers) else len(template)
+        content = template[m.end() : end].strip("\r\n")
+        if not content.strip():
+            raise ValueError(f"chat message #{i + 1} ({m.group(1)}) is empty")
+        messages.append({"role": m.group(1), "content": content})
+    return messages
 
 
 @dataclass
@@ -34,6 +79,7 @@ class Prompt:
     params: dict = field(default_factory=dict)
     variables: list[str] = field(default_factory=list)
     source_file: str = ""
+    format: str = "text"
 
     @property
     def template_sha256(self) -> str:
@@ -84,7 +130,7 @@ def _build_prompt(mapping: dict, source: str) -> Prompt:
         raise InvalidPromptError(f"{source}: missing required field 'name'")
     if not template or not isinstance(template, str):
         raise InvalidPromptError(f"{source}: missing required field 'template'")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+    if not is_valid_name(name):
         raise InvalidPromptError(
             f"{source}: prompt name {name!r} must match [A-Za-z0-9][A-Za-z0-9_-]*"
         )
@@ -100,6 +146,14 @@ def _build_prompt(mapping: dict, source: str) -> Prompt:
     description = mapping.get("description") or ""
     if not isinstance(description, str):
         raise InvalidPromptError(f"{source}: 'description' must be a string")
+    fmt = mapping.get("format") or "text"
+    if fmt not in FORMATS:
+        raise InvalidPromptError(f"{source}: 'format' must be one of {', '.join(FORMATS)}")
+    if fmt == "chat":
+        try:
+            split_messages(template)
+        except ValueError as exc:
+            raise InvalidPromptError(f"{source}: {exc}") from exc
     return Prompt(
         name=name,
         template=template,
@@ -108,6 +162,7 @@ def _build_prompt(mapping: dict, source: str) -> Prompt:
         params=params,
         variables=variables,
         source_file=source,
+        format=fmt,
     )
 
 
