@@ -26,7 +26,9 @@ def test_clean_prompt_no_findings():
 
 
 def test_secret_patterns_warn_best_effort():
-    p = _prompt(template="key = sk-abcdefghijklmnopqrstuvwx")
+    # Built at runtime so no contiguous fake secret sits in the source.
+    fake_key = "sk" + "-" + "abcdefghij" + "klmnopqrstuvwx"
+    p = _prompt(template=f"key = {fake_key}")
     findings = validatemod.validate_prompt(p)
     secret = [f for f in findings if "secret" in f.message]
     assert secret
@@ -34,7 +36,8 @@ def test_secret_patterns_warn_best_effort():
 
 
 def test_private_key_block_warns():
-    p = _prompt(template="-----BEGIN RSA PRIVATE KEY-----\nabc")
+    header = "-----BEGIN " + "RSA PRIVATE" + " KEY-----"
+    p = _prompt(template=f"{header}\nabc")
     findings = validatemod.validate_prompt(p)
     assert any("secret" in f.message for f in findings)
 

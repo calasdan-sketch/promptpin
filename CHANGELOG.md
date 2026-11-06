@@ -2,6 +2,32 @@
 
 ## 0.2.0 — unreleased
 
+### Panel review fixes (second pass)
+- **verify / bundles now cover model, params and format, not just the
+  template.** Each lock pin and bundle entry carries a `digest` (SHA-256 of
+  canonical JSON of template hash, model, params, format); bundles carry a
+  `bundle_digest`. `verify` compares every field against git, `verify
+  --bundle` compares the manifest against the lock, `export` refuses a lock
+  that disagrees with git, and `load_bundle` rejects edited entries.
+  `load_bundle(dir, expected_digest=...)` pins a specific build. Bundles
+  exported before this change must be re-exported; pins deployed before it
+  verify with a "no digest — redeploy" warning.
+- Hidden-character scan: every Unicode format character (category Cf),
+  Hangul/braille fillers, U+034F, runs of variation selectors ("emoji
+  smuggling") and lone carriage returns are errors; a single U+FE0E/U+FE0F
+  after a visible character is allowed. Params are scanned recursively
+  (lists, nested mappings, keys), and variable names too.
+- Git output and prompt files are read as bytes and decoded as strict UTF-8
+  (CRLF normalized to LF), independent of the OS locale. A lone `\r` is no
+  longer silently turned into a newline.
+- YAML aliases are rejected everywhere promptpin reads YAML; the writer never
+  emits them.
+- A non-UTF-8 pinned file is reported as a `verify` check, not a traceback.
+- `diff` warns when the *set* of invisible characters changes, not only the
+  count.
+- A non-string `env` in a bundle manifest is an error, not a crash.
+- Tests build fake secrets at runtime and use neutral sample data.
+
 ### Added
 - `promptpin verify`: CI gate that re-derives every pin in `promptpin.lock`
   from git (commit exists, prompt file exists at the SHA, name matches,

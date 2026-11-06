@@ -18,10 +18,14 @@ import random
 from pathlib import Path
 from re import Match
 
-import yaml
-
-from promptpin import statedb
-from promptpin.registry import VARIABLE_RE, is_valid_name, split_messages
+from promptpin import statedb, yamlsafe
+from promptpin.registry import (
+    FORMATS,
+    VARIABLE_RE,
+    config_digest,
+    is_valid_name,
+    split_messages,
+)
 
 
 def resolve(lock_path: str | Path, env: str, prompt: str) -> dict:
@@ -35,7 +39,7 @@ def resolve(lock_path: str | Path, env: str, prompt: str) -> dict:
     directory produced by ``promptpin export``.
     """
     lock_path = Path(lock_path)
-    data = yaml.safe_load(lock_path.read_text(encoding="utf-8")) or {}
+    data = yamlsafe.load(lock_path.read_text(encoding="utf-8")) or {}
     pin = None
     if isinstance(data.get("envs"), dict):
         try:
@@ -49,13 +53,23 @@ def resolve(lock_path: str | Path, env: str, prompt: str) -> dict:
     return dict(pin)
 
 
-def load_bundle(bundle_dir: str | Path) -> dict:
+def load_bundle(bundle_dir: str | Path, expected_digest: str | None = None) -> dict:
     """Load a bundle produced by ``promptpin export``.
 
-    Returns ``{name: {sha, ref, model, params, template_sha256, file,
-    template}}``. Every template is hash-checked against the pinned
-    ``template_sha256`` — a bundle that drifted from its pin fails loudly
-    instead of serving the wrong prompt.
+    Returns ``{name: {sha, ref, model, params, format, template_sha256,
+    digest, file, template}}``. Fails loudly instead of serving the wrong
+    prompt when:
+
+    - a template file's bytes don't match its ``template_sha256``;
+    - an entry's ``digest`` doesn't cover its template hash, model, params
+      and format (so editing ``model`` or ``params`` in the manifest fails);
+    - the manifest's ``bundle_digest`` doesn't match its entries.
+
+    These digests are unkeyed: they catch drift and casual edits, not an
+    attacker who can rewrite the whole bundle. For that, pass
+    ``expected_digest`` — the ``bundle_digest`` printed by ``promptpin
+    export`` — from somewhere the attacker can't write (your build config or
+    deploy environment), and any change to the bundle is rejected.
     """
     import hashlib
 
@@ -65,7 +79,7 @@ def load_bundle(bundle_dir: str | Path) -> dict:
         raise FileNotFoundError(
             f"{manifest_path} not found — is this a `promptpin export` directory?"
         )
-    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+    manifest = yamlsafe.load(manifest_path.read_text(encoding="utf-8")) or {}
     prompts = manifest.get("prompts") if isinstance(manifest, dict) else None
     if not isinstance(prompts, dict) or not prompts:
         # Fail closed: an empty or malformed bundle must not "load" as zero prompts.
@@ -92,7 +106,38 @@ def load_bundle(bundle_dir: str | Path) -> dict:
                 f"(expected {expected_hash[:12]}…, got {digest[:12]}…) — "
                 "re-export the bundle"
             )
-        result[name] = {"format": "text", **meta, "template": raw.decode("utf-8")}
+        fmt = meta.get("format", "text")
+        params = meta.get("params") if meta.get("params") is not None else {}
+        model = meta.get("model") or ""
+        if not isinstance(params, dict) or not isinstance(model, str) or fmt not in FORMATS:
+            raise ValueError(f"{manifest_path}: entry {name!r} has invalid model/params/format")
+        want = config_digest(digest, model, params, fmt)
+        if meta.get("digest") != want:
+            raise ValueError(
+                f"bundle entry {name!r}: model/params/format do not match its digest"
+                " (manifest edited, or exported by promptpin < 0.2) — re-export the bundle"
+            )
+        try:
+            template = yamlsafe.decode(raw, expected_file)
+        except ValueError as exc:
+            raise ValueError(f"bundle template for {name!r}: {exc}") from None
+        result[name] = {
+            **meta,
+            "format": fmt,
+            "params": params,
+            "model": model,
+            "template": template,
+        }
+    from promptpin.deploys import bundle_digest
+
+    actual = bundle_digest(result)
+    if manifest.get("bundle_digest") != actual:
+        raise ValueError(f"{manifest_path}: bundle_digest does not match its entries — re-export")
+    if expected_digest is not None and expected_digest != actual:
+        raise ValueError(
+            f"bundle digest {actual[:12]}… is not the expected {str(expected_digest)[:12]}…"
+            " — this is not the bundle your build produced"
+        )
     return result
 
 

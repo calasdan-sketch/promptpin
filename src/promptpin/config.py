@@ -7,6 +7,7 @@ from pathlib import Path
 
 import yaml
 
+from promptpin import yamlsafe
 from promptpin.errors import ConfigError
 
 CONFIG_FILENAME = "promptpin.yaml"
@@ -29,7 +30,7 @@ class Config:
         if not path.exists():
             return cls()
         try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            data = yamlsafe.load(path.read_text(encoding="utf-8")) or {}
         except yaml.YAMLError as exc:
             raise ConfigError(f"{CONFIG_FILENAME}: invalid YAML: {exc}") from exc
         if not isinstance(data, dict):

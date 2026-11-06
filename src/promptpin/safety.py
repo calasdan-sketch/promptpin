@@ -35,15 +35,27 @@ ZERO_WIDTH_CHARS = frozenset([0x200B, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0x
 JOINER_CHARS = frozenset([0x200C, 0x200D])
 #: Unicode tag block — invisible ASCII look-alikes ("ASCII smuggling").
 TAG_RANGE = range(0xE0000, 0xE0080)
+#: Hangul/braille/combining "filler" characters that render as blank space
+#: but are not category Cf.
+FILLER_CHARS = frozenset([0x034F, 0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0])
+#: Variation selectors. Any run of them can encode hidden bytes ("emoji
+#: smuggling"); a single U+FE0E/U+FE0F after a visible character is the
+#: normal text/emoji presentation switch and is allowed.
+VS_RANGES = (range(0xFE00, 0xFE10), range(0xE0100, 0xE01F0))
+PRESENTATION_SELECTORS = frozenset([0xFE0E, 0xFE0F])
 #: Whitespace control characters that are fine in a prompt.
 ALLOWED_CONTROLS = frozenset("\t\n\r")
+
+
+def is_variation_selector(cp: int) -> bool:
+    return any(cp in r for r in VS_RANGES)
 
 
 @dataclass(frozen=True)
 class HiddenChar:
     index: int
     codepoint: int
-    kind: str  # "bidi" | "tag" | "control" | "zero-width" | "joiner"
+    kind: str  # bidi | tag | control | zero-width | format | filler | variation-selector | joiner
     severity: str  # "error" | "warning"
 
     @property
@@ -53,7 +65,11 @@ class HiddenChar:
 
 
 def classify(ch: str) -> tuple[str, str] | None:
-    """Return ``(kind, severity)`` for a suspicious character, else None."""
+    """Return ``(kind, severity)`` for a suspicious character, else None.
+
+    Per-character view; ``find_hidden`` adds context rules (variation
+    selector runs, lone carriage returns).
+    """
     cp = ord(ch)
     if cp in BIDI_CHARS:
         return "bidi", "error"
@@ -63,20 +79,49 @@ def classify(ch: str) -> tuple[str, str] | None:
         return None
     if cp < 0x20 or 0x7F <= cp <= 0x9F or cp in (0x2028, 0x2029):
         return "control", "error"
-    if cp in ZERO_WIDTH_CHARS:
-        return "zero-width", "error"
     if cp in JOINER_CHARS:
         return "joiner", "warning"
+    if cp in ZERO_WIDTH_CHARS:
+        return "zero-width", "error"
+    if is_variation_selector(cp):
+        return "variation-selector", "warning"
+    if cp in FILLER_CHARS:
+        return "filler", "error"
+    if unicodedata.category(ch) == "Cf":
+        # Every other Unicode "format" character: invisible by definition
+        # (e.g. U+180E, U+206A-206F, U+FFF9-FFFB, U+0600-0605, U+1D173-1D17A).
+        return "format", "error"
     return None
 
 
 def find_hidden(text: str) -> list[HiddenChar]:
     """Every suspicious invisible/control character in ``text``, in order."""
     found = []
-    for i, ch in enumerate(text):
-        hit = classify(ch)
-        if hit:
-            found.append(HiddenChar(i, ord(ch), hit[0], hit[1]))
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        cp = ord(ch)
+        if is_variation_selector(cp):
+            j = i
+            while j < n and is_variation_selector(ord(text[j])):
+                j += 1
+            run = j - i
+            if run == 1 and cp in PRESENTATION_SELECTORS and i > 0:
+                i = j  # ordinary emoji/text presentation selector
+                continue
+            severity = "error" if run > 1 else "warning"
+            for k in range(i, j):
+                found.append(HiddenChar(k, ord(text[k]), "variation-selector", severity))
+            i = j
+            continue
+        if ch == "\r" and not (i + 1 < n and text[i + 1] == "\n"):
+            found.append(HiddenChar(i, cp, "control", "error"))  # lone CR rewrites lines
+        else:
+            hit = classify(ch)
+            if hit:
+                found.append(HiddenChar(i, cp, hit[0], hit[1]))
+        i += 1
     return found
 
 
@@ -101,7 +146,7 @@ def sanitize(text: object, keep_newlines: bool = True) -> str:
             out.append(ch)
         elif ch == "\t":
             out.append(ch)
-        elif ch in "\n\r" or classify(ch):
+        elif ch in "\n\r" or (classify(ch) and ord(ch) not in PRESENTATION_SELECTORS):
             out.append(_escape(ch))
         else:
             out.append(ch)

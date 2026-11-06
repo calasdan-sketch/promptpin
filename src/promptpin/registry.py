@@ -24,12 +24,12 @@ messages with a role line, one of ``system:``, ``developer:``, ``user:`` or
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
-
+from promptpin import yamlsafe
 from promptpin.errors import InvalidPromptError, PromptNotFoundError
 
 PROMPTS_DIRNAME = "prompts"
@@ -41,6 +41,29 @@ NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
 #: Chat role marker: a role name alone on its own line.
 ROLE_RE = re.compile(r"^[ \t]*(system|developer|user|assistant)[ \t]*:[ \t]*\r?$", re.MULTILINE)
 FORMATS = ("text", "chat")
+
+
+def config_digest(template_sha256: str, model: str, params: dict, fmt: str) -> str:
+    """One SHA-256 over everything that changes what the model receives.
+
+    Covers the template hash, model, params and format, as canonical JSON
+    (sorted keys, ASCII, no whitespace). A change to any of them changes the
+    digest, so a bundle or lock entry cannot swap the model or params while
+    keeping the template hash.
+    """
+    canonical = json.dumps(
+        {
+            "format": fmt or "text",
+            "model": model or "",
+            "params": params or {},
+            "template_sha256": template_sha256,
+        },
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
 def is_valid_name(name: object) -> bool:
@@ -85,6 +108,11 @@ class Prompt:
     def template_sha256(self) -> str:
         return hashlib.sha256(self.template.encode("utf-8")).hexdigest()
 
+    @property
+    def digest(self) -> str:
+        """``config_digest`` of this prompt (template + model + params + format)."""
+        return config_digest(self.template_sha256, self.model, self.params, self.format)
+
     def template_variables(self) -> list[str]:
         """Variables actually referenced as {{var}} in the template, in order."""
         seen: list[str] = []
@@ -102,8 +130,8 @@ def _parse_mapping(data: object, source: str) -> dict:
 
 def parse_yaml_text(text: str, source: str) -> Prompt:
     try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
+        data = yamlsafe.load(text)
+    except yamlsafe.yaml.YAMLError as exc:
         raise InvalidPromptError(f"{source}: invalid YAML: {exc}") from exc
     return _build_prompt(_parse_mapping(data, source), source)
 
@@ -115,8 +143,8 @@ def parse_markdown_text(text: str, source: str) -> Prompt:
             f"{source}: Markdown prompts need YAML frontmatter between --- lines"
         )
     try:
-        data = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
+        data = yamlsafe.load(match.group(1))
+    except yamlsafe.yaml.YAMLError as exc:
         raise InvalidPromptError(f"{source}: invalid frontmatter YAML: {exc}") from exc
     mapping = _parse_mapping(data, source)
     mapping["template"] = match.group(2)
@@ -190,7 +218,10 @@ def load_prompt(repo_root: Path, prompts_dir: str, name: str) -> Prompt:
             f"prompt {name!r} not found in {prompts_dir}/ "
             "(expected <name>.yaml, <name>.yml or <name>.md)"
         )
-    text = (repo_root / rel).read_text(encoding="utf-8")
+    try:
+        text = yamlsafe.decode((repo_root / rel).read_bytes(), rel)
+    except ValueError as exc:
+        raise InvalidPromptError(str(exc)) from None
     prompt = parse_text(text, rel)
     if prompt.name != name:
         raise InvalidPromptError(

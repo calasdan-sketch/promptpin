@@ -29,7 +29,7 @@ from pathlib import Path
 
 import yaml
 
-from promptpin import gitutil, registry, statedb
+from promptpin import gitutil, registry, statedb, yamlsafe
 from promptpin.config import LOCK_FILENAME, Config, deploy_lock_path
 from promptpin.errors import DeployError, InvalidPromptError, LockError, VersionNotFoundError
 
@@ -46,6 +46,8 @@ class Pin:
     deployed_by: str
     note: str = ""
     mutable_ref: bool = False
+    format: str = ""  # "" = written by promptpin < 0.2 (treated as "text")
+    digest: str = ""  # registry.config_digest; "" = written by promptpin < 0.2
 
     def to_mapping(self) -> dict:
         return {
@@ -59,6 +61,8 @@ class Pin:
             "deployed_by": self.deployed_by,
             "note": self.note,
             "mutable_ref": self.mutable_ref,
+            "format": self.format or "text",
+            "digest": self.digest,
         }
 
     @classmethod
@@ -79,6 +83,8 @@ class Pin:
             deployed_by=text("deployed_by"),
             note=text("note"),
             mutable_ref=bool(m.get("mutable_ref", False)),
+            format=text("format"),
+            digest=text("digest"),
         )
 
 
@@ -93,7 +99,7 @@ def read_lock(repo_root: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        data = yamlsafe.load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise DeployError(f"{LOCK_FILENAME} is not valid YAML (merge conflict?): {exc}") from exc
     if not isinstance(data, dict):
@@ -123,7 +129,7 @@ def write_lock(repo_root: Path, pins: dict) -> None:
             for env, prompts in pins.items()
         },
     }
-    (repo_root / LOCK_FILENAME).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    (repo_root / LOCK_FILENAME).write_text(yamlsafe.dump(data), encoding="utf-8")
 
 
 @contextmanager
@@ -218,6 +224,39 @@ def template_at(top: Path, cfg: Config, name: str, sha: str) -> str:
     return prompt_at(top, cfg, name, sha).template
 
 
+def pin_mismatches(pin: Pin, prompt: registry.Prompt) -> list[str]:
+    """Every way ``pin`` disagrees with the prompt file at its SHA.
+
+    Compares template hash, model, params and format, and the combined digest
+    when the pin has one. Empty list = the pin is exactly what git holds.
+    """
+    problems = []
+    if prompt.template_sha256 != pin.template_sha256:
+        problems.append(
+            f"template_sha256 mismatch (lock says {pin.template_sha256[:12]}…,"
+            f" git has {prompt.template_sha256[:12]}…)"
+        )
+    if pin.model != prompt.model:
+        problems.append(f"model mismatch (lock says {pin.model!r}, git has {prompt.model!r})")
+    if pin.params != (prompt.params or {}):
+        problems.append(f"params mismatch (lock says {pin.params!r}, git has {prompt.params!r})")
+    if (pin.format or "text") != prompt.format:
+        problems.append(f"format mismatch (lock says {pin.format!r}, git has {prompt.format!r})")
+    if pin.digest and pin.digest != prompt.digest:
+        problems.append("digest mismatch (lock entry was edited after deploy)")
+    return problems
+
+
+def bundle_digest(entries: dict) -> str:
+    """SHA-256 over every entry's name, commit and config digest, in name order."""
+    import hashlib
+
+    lines = "".join(
+        f"{n}\t{entries[n].get('sha')}\t{entries[n].get('digest')}\n" for n in sorted(entries)
+    )
+    return hashlib.sha256(lines.encode("ascii", errors="replace")).hexdigest()
+
+
 def export_bundle(repo_root: Path, env: str, out_dir: Path) -> dict:
     """Export pinned templates + manifest for runtime use.
 
@@ -237,11 +276,13 @@ def export_bundle(repo_root: Path, env: str, out_dir: Path) -> dict:
         if not gitutil.is_full_sha(pin.sha):
             raise DeployError(f"{env}/{name}: pinned sha {pin.sha!r} is not a full commit SHA")
         prompt = prompt_at(top, cfg, name, pin.sha)
-        if prompt.template_sha256 != pin.template_sha256:
-            # Fail closed: never ship a template that differs from what was pinned.
+        problems = pin_mismatches(pin, prompt)
+        if problems:
+            # Fail closed: never ship a template, model or params that differ
+            # from what git holds at the pinned commit.
             raise DeployError(
-                f"{env}/{name}: template at {pin.sha[:7]} does not match the pinned"
-                " template_sha256 — run `promptpin verify`"
+                f"{env}/{name}: lock does not match git at {pin.sha[:7]}: {problems[0]}"
+                " — run `promptpin verify`"
             )
         filename = f"{name}.template.md"
         # Bytes, not text mode: text mode would translate newlines on Windows
@@ -250,17 +291,25 @@ def export_bundle(repo_root: Path, env: str, out_dir: Path) -> dict:
         manifest_prompts[name] = {
             "sha": pin.sha,
             "ref": pin.ref,
-            "model": pin.model,
-            "params": pin.params,
+            "model": prompt.model,
+            "params": prompt.params or {},
             "format": prompt.format,
-            "template_sha256": pin.template_sha256,
+            "template_sha256": prompt.template_sha256,
+            "digest": prompt.digest,
             "file": filename,
         }
-    manifest = {"env": env, "prompts": manifest_prompts}
-    (out_dir / "manifest.yaml").write_text(
-        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
-    )
-    return {"env": env, "out": str(out_dir), "prompts": sorted(manifest_prompts)}
+    manifest = {
+        "env": env,
+        "bundle_digest": bundle_digest(manifest_prompts),
+        "prompts": manifest_prompts,
+    }
+    (out_dir / "manifest.yaml").write_text(yamlsafe.dump(manifest), encoding="utf-8")
+    return {
+        "env": env,
+        "out": str(out_dir),
+        "prompts": sorted(manifest_prompts),
+        "bundle_digest": manifest["bundle_digest"],
+    }
 
 
 def deploy(
@@ -319,6 +368,8 @@ def deploy(
         model=prompt.model,
         params=prompt.params,
         template_sha256=prompt.template_sha256,
+        format=prompt.format,
+        digest=prompt.digest,
         deployed_at=_utc_iso(),
         deployed_by=actor,
         note=note,
@@ -513,12 +564,10 @@ def verify_lock(
                 continue
             if prompt.name != name:
                 add("error", f"file at {pin.sha[:7]} declares name {prompt.name!r}")
-            if prompt.template_sha256 != pin.template_sha256:
-                add(
-                    "error",
-                    f"template_sha256 mismatch at {pin.sha[:7]} (lock says"
-                    f" {str(pin.template_sha256)[:12]}…, git has {prompt.template_sha256[:12]}…)",
-                )
+            for problem in pin_mismatches(pin, prompt):
+                add("error", f"{problem} at {pin.sha[:7]}")
+            if not pin.digest:
+                add("warning", "pin has no digest (deployed by promptpin < 0.2) — redeploy it")
             if pin.mutable_ref:
                 add("warning", f"deployed from mutable ref {pin.ref!r} (frozen at {pin.sha[:7]})")
     for env_name, name, msg in _tag_issues(top, pins):
@@ -534,10 +583,12 @@ def _verify_bundle(pins: dict, bundle_dir: Path, env: str | None, load_bundle) -
     manifest_path = Path(bundle_dir) / "manifest.yaml"
     try:
         bundle = load_bundle(bundle_dir)
-        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8")) or {}
+        manifest = yamlsafe.load(manifest_path.read_text(encoding="utf-8")) or {}
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return [Check("error", env or "-", "-", f"bundle: {exc}")]
-    bundle_env = manifest.get("env")
+    bundle_env = manifest.get("env") if isinstance(manifest, dict) else None
+    if not isinstance(bundle_env, str) or not bundle_env:
+        return [Check("error", env or "-", "-", f"bundle: manifest env {bundle_env!r} is invalid")]
     if env is not None and bundle_env != env:
         checks.append(Check("error", env, "-", f"bundle is for env {bundle_env!r}, not {env!r}"))
         return checks
@@ -551,7 +602,7 @@ def _verify_bundle(pins: dict, bundle_dir: Path, env: str | None, load_bundle) -
             checks.append(Check("error", bundle_env, name, "in bundle but not pinned"))
         else:
             b, p = bundle[name], expected[name]
-            if b.get("sha") != p.sha or b.get("template_sha256") != p.template_sha256:
+            if b.get("sha") != p.sha:
                 checks.append(
                     Check(
                         "error",
@@ -561,4 +612,23 @@ def _verify_bundle(pins: dict, bundle_dir: Path, env: str | None, load_bundle) -
                         " — re-run `promptpin export`",
                     )
                 )
+                continue
+            for field_name, want in (
+                ("template_sha256", p.template_sha256),
+                ("model", p.model),
+                ("params", p.params),
+                ("format", p.format or "text"),
+            ):
+                if b.get(field_name) != want:
+                    checks.append(
+                        Check(
+                            "error",
+                            bundle_env,
+                            name,
+                            f"bundle {field_name} {b.get(field_name)!r} differs from the lock"
+                            f" ({want!r})",
+                        )
+                    )
+            if p.digest and b.get("digest") != p.digest:
+                checks.append(Check("error", bundle_env, name, "bundle digest differs from lock"))
     return checks

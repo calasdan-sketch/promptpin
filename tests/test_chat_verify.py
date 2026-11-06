@@ -1,5 +1,6 @@
 """Chat prompts, `verify` CI gate, and input hardening."""
 
+import copy
 import json
 import subprocess
 
@@ -117,7 +118,7 @@ def _edit_lock(repo, fn):
     path = repo / LOCK_FILENAME
     data = yaml.safe_load(path.read_text())
     fn(data["envs"])
-    path.write_text(yaml.safe_dump(data))
+    path.write_text(yaml.safe_dump(copy.deepcopy(data)))
 
 
 def test_verify_clean(prompt_repo, capsys):
@@ -143,7 +144,7 @@ def test_verify_fails_on_unknown_env_filter(prompt_repo, capsys):
         (lambda e: e["production"]["classifier"].update(template_sha256="0" * 64), "mismatch"),
         (lambda e: e["production"]["classifier"].update(sha="1" * 40), "not in this repo"),
         (lambda e: e["production"]["classifier"].update(sha="abc1234"), "not a full"),
-        (lambda e: e.update(qa=dict(e["production"])), "not configured"),
+        (lambda e: e.update(qa=copy.deepcopy(e["production"])), "not configured"),
     ],
 )
 def test_verify_detects_tampering(prompt_repo, capsys, mutate, expect):
@@ -220,7 +221,9 @@ def test_read_lock_rejects_path_traversal_names(prompt_repo):
     _deployed(prompt_repo)
     _edit_lock(
         prompt_repo,
-        lambda e: e["production"].update({"../../escape": e["production"]["classifier"]}),
+        lambda e: e["production"].update(
+            {"../../escape": copy.deepcopy(e["production"]["classifier"])}
+        ),
     )
     with pytest.raises(DeployError, match="invalid prompt name"):
         deploys.read_lock(prompt_repo)
@@ -290,4 +293,5 @@ def test_lock_with_non_string_fields_does_not_crash(prompt_repo, capsys):
     _deployed(prompt_repo)
     _edit_lock(prompt_repo, lambda e: e["production"]["classifier"].update(tag=123, params=[1]))
     rc, out, _ = _run(["verify"], prompt_repo, capsys)
-    assert rc == 0 and "123" in out  # reported as a missing tag, not a traceback
+    # Reported as checks (missing tag, params mismatch), not a traceback.
+    assert rc == 1 and "123" in out and "params mismatch" in out

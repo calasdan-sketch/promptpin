@@ -109,12 +109,20 @@ def render_diff(
     out: list[str] = []
     out.append(f"promptpin diff {name}: {one(disp_a)} ({sha_a[:7]}) → {one(disp_b)} ({sha_b[:7]})")
     hidden_a, hidden_b = safety.find_hidden(a.template), safety.find_hidden(b.template)
-    if len(hidden_b) > len(hidden_a):
+    # Compare *which* characters, not just how many: swapping a harmless
+    # joiner for a tag character keeps the count but is a new risk.
+    new_kinds = {h.codepoint for h in hidden_b} - {h.codepoint for h in hidden_a}
+    added = len(hidden_b) - len(hidden_a)
+    if new_kinds or added > 0:
+        labels = ", ".join(f"U+{cp:04X}" for cp in sorted(new_kinds)[:5])
+        detail = f" (new: {labels})" if labels else ""
+        count = (
+            f"adds {added} invisible character(s)" if added > 0 else "changes invisible characters"
+        )
         out.append(
             paint(
                 "33",
-                f"⚠ {one(disp_b)} adds {len(hidden_b) - len(hidden_a)} invisible character(s);"
-                " they are shown below as \\uXXXX escapes",
+                f"⚠ {one(disp_b)} {count}{detail}; they are shown below as \\uXXXX escapes",
             )
         )
     out.append("")

@@ -11,7 +11,8 @@ import re
 import subprocess
 from pathlib import Path
 
-from promptpin.errors import NotAGitRepoError, VersionNotFoundError
+from promptpin import yamlsafe
+from promptpin.errors import InvalidPromptError, NotAGitRepoError, VersionNotFoundError
 
 #: A version label: ``v3`` or ``3``. Anything else (``vnext``, ``v2-exp``) is
 #: treated as an ordinary git ref (branch, tag or SHA).
@@ -51,20 +52,30 @@ def tag_name(prompt: str, version: str) -> str:
     return f"{TAG_PREFIX}/{prompt}@{version}"
 
 
-def _run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _run_bytes(repo: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     try:
-        return subprocess.run(
-            ["git", *args],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
+        return subprocess.run(["git", *args], cwd=repo, capture_output=True)
     except OSError:
         # Nonexistent cwd (or git missing): behave like a failed git call so
         # callers raise NotAGitRepoError instead of leaking FileNotFoundError.
         return subprocess.CompletedProcess(
-            args=["git", *args], returncode=128, stdout="", stderr="not a git repository"
+            args=["git", *args], returncode=128, stdout=b"", stderr=b"not a git repository"
         )
+
+
+def _run(repo: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    """Run git; decode output as UTF-8 regardless of the OS locale.
+
+    (``text=True`` would use the locale codec — ASCII under ``LC_ALL=C``,
+    cp1252 on many Windows machines — and crash or garble non-ASCII text.)
+    """
+    proc = _run_bytes(repo, *args)
+    return subprocess.CompletedProcess(
+        args=proc.args,
+        returncode=proc.returncode,
+        stdout=proc.stdout.decode("utf-8", errors="replace"),
+        stderr=proc.stderr.decode("utf-8", errors="replace"),
+    )
 
 
 def ensure_repo(repo: Path) -> Path:
@@ -176,13 +187,16 @@ def create_tag(repo: Path, prompt: str, version: str, sha: str, message: str) ->
 
 def show_file(repo: Path, sha: str, relpath: str) -> str:
     """Return the contents of ``relpath`` at commit ``sha``."""
-    proc = _run(repo, "show", f"{sha}:{relpath}")
+    proc = _run_bytes(repo, "show", f"{sha}:{relpath}")
     if proc.returncode != 0:
         raise VersionNotFoundError(
             f"{relpath} does not exist at {sha[:7]} — "
             "the prompt may have been added later, or renamed"
         )
-    return proc.stdout
+    try:
+        return yamlsafe.decode(proc.stdout, f"{relpath} at {sha[:7]}")
+    except ValueError as exc:
+        raise InvalidPromptError(str(exc)) from None
 
 
 def file_history(repo: Path, relpath: str, limit: int = 20) -> list[dict]:

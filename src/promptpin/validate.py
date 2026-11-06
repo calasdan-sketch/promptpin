@@ -44,9 +44,23 @@ def _hidden_findings(prompt: registry.Prompt) -> list[Finding]:
         "description": prompt.description,
         "model": prompt.model,
     }
-    for key, value in (prompt.params or {}).items():
+
+    def walk(value: object, path: str, depth: int = 0) -> None:
+        if depth > 50:
+            return
         if isinstance(value, str):
-            fields[f"params.{key}"] = value
+            fields[path] = value
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                walk(str(k), f"{path}.{k} (key)", depth + 1)
+                walk(v, f"{path}.{k}", depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for idx, v in enumerate(value):
+                walk(v, f"{path}[{idx}]", depth + 1)
+
+    walk(prompt.params or {}, "params")
+    for idx, var in enumerate(prompt.variables):
+        fields[f"variables[{idx}]"] = var
     findings = []
     for field_name, text in fields.items():
         hits = safety.find_hidden(text or "")

@@ -7,7 +7,7 @@ import datetime
 import sys
 from pathlib import Path
 
-from promptpin import deploys, gitutil, registry, safety, statedb
+from promptpin import deploys, gitutil, registry, safety, statedb, yamlsafe
 from promptpin import diff as diffmod
 from promptpin import validate as validatemod
 from promptpin.config import (
@@ -397,7 +397,6 @@ def cmd_history(args) -> int:
 
 def cmd_lock(args) -> int:
     """Export a minimal runtime manifest: env → prompt → {sha, model, params, template_sha256}."""
-    import yaml
 
     top = _repo(args)
     pins = deploys.read_lock(top)
@@ -417,7 +416,7 @@ def cmd_lock(args) -> int:
         },
     }
     out = Path(args.out)
-    out.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+    out.write_text(yamlsafe.dump(manifest), encoding="utf-8")
     _say(f"wrote {out} ({len(prompts)} prompts for {args.env})")
     return 0
 
@@ -426,7 +425,8 @@ def cmd_export(args) -> int:
     top = _repo(args)
     result = deploys.export_bundle(top, args.env, Path(args.out))
     _say(f"exported {len(result['prompts'])} prompts for {args.env} → {result['out']}/")
-    _say("bundle with your app; load with promptpin.load_bundle(<dir>)")
+    _say(f"bundle_digest: {result['bundle_digest']}")
+    _say("bundle with your app; load with promptpin.load_bundle(<dir>, expected_digest=...)")
     return 0
 
 
