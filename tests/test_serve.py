@@ -85,8 +85,8 @@ def test_client_log_serve_bad_sample_rate(tmp_path):
 
 
 def test_render_template_substitutes():
-    out = render_template("Hello {{name}}, you are {{age}}.", name="Dan", age=40)
-    assert out == "Hello Dan, you are 40."
+    out = render_template("Hello {{name}}, you are {{age}}.", name="Example User", age=1)
+    assert out == "Hello Example User, you are 1."
 
 
 def test_render_template_missing_var_raises():

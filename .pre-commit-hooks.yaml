@@ -1,0 +1,22 @@
+# Use promptpin as a pre-commit hook in your own repo:
+#
+#   repos:
+#     - repo: https://github.com/calasdan-sketch/promptpin
+#       rev: <a released tag>   # pin it; never track a branch
+#       hooks:
+#         - id: promptpin-validate
+#         - id: promptpin-verify
+- id: promptpin-validate
+  name: promptpin validate
+  description: Schema, variable, hidden-character and best-effort secret checks on prompts/.
+  entry: promptpin validate
+  language: python
+  pass_filenames: false
+  always_run: true
+- id: promptpin-verify
+  name: promptpin verify
+  description: Re-derive every pin in promptpin.lock from git and fail on any mismatch.
+  entry: promptpin verify
+  language: python
+  pass_filenames: false
+  files: ^promptpin\.lock$

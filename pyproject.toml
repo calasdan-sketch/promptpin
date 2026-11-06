@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "promptpin"
-version = "0.1.1"
+version = "0.2.0"
 description = "Git-native prompt registry: version prompts with git, pin versions to envs, log what served, diff with evals attached."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -31,3 +31,6 @@ select = ["E", "F", "I", "W", "UP", "B"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Tests import shared helpers as `tests.conftest`; make plain `pytest` work
+# from a fresh clone (not only `python -m pytest`).
+pythonpath = ["."]
