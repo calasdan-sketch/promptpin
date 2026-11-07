@@ -237,6 +237,10 @@ def a_tag_chars(c: Ctx):
     commit(c.repo, BASE_PROMPT.replace("Reply", hidden + "Reply"), "tags")
 
 
+def a_homoglyph(c: Ctx):
+    commit(c.repo, BASE_PROMPT.replace("this ticket", "this t\u0456cket", 1), "homoglyph")
+
+
 def a_served_other_sha(c: Ctx):
     log_serve(c.db, prompt="classifier", sha="a" * 40, digest="b" * 64)
     conn = sqlite3.connect(c.db)
@@ -282,6 +286,7 @@ ATTACKS = [
     ("PR: add bidi override to template", a_bidi_in_template),
     ("PR: add zero-width char to template", a_zero_width),
     ("PR: add Unicode tag characters (ASCII smuggling)", a_tag_chars),
+    ("PR: Cyrillic look-alike letter inside a word", a_homoglyph),
     ("Runtime: request served an unpinned commit", a_served_other_sha),
     ("Runtime: pinned commit, drifted config digest", a_served_other_digest),
     ("Attestation: forged signature", a_forged_attestation),
@@ -296,6 +301,7 @@ DEFENCES = [
     ("load_bundle", "0.2.0"),
     ("load_bundle + expected digest", "0.2.0"),
     ("validate", "0.2.0"),
+    ("validate --strict", "0.3.0"),
     ("verify --reachable-from main", "0.3.0"),
     ("log verify", "0.3.0"),
     ("attest-verify", "0.3.0"),
@@ -335,6 +341,7 @@ def evaluate(c: Ctx, att_pre_digest: str) -> list[bool]:
     res.append(loads(expected_digest=c.digest))
     findings = validate.validate_all(c.repo)
     res.append(any(f.level == "error" for f in findings))
+    res.append(bool(findings))  # --strict: warnings fail too
     reach = deploys.verify_lock(c.repo, env="production", reachable_from="main")
     res.append(any(x.level == "error" and "reachable" in x.message for x in reach))
     res.append(_errors(verify_serving(c.repo, "production", c.db, grace_seconds=0)))
@@ -551,6 +558,59 @@ def hash_granularity() -> tuple[str, dict]:
 # --------------------------------------------------------------- runtime ---
 
 
+def _load() -> str:
+    try:
+        return (
+            "/".join(f"{x:.1f}" for x in os.getloadavg())
+            + " (1/5/15 min; timings are noisy when high)"
+        )
+    except (AttributeError, OSError):
+        return "unavailable on this platform"
+
+
+def _logging_cost(out: dict) -> str:
+    """Serving-log append cost and concurrent-writer failures; hidden-character scan speed."""
+    import threading
+
+    from promptpin import safety
+
+    with tempfile.TemporaryDirectory() as d:
+        db = Path(d) / "s.db"
+        log_serve(db, prompt="p", sha="a" * 40)
+        n = 500
+        t = time.perf_counter()
+        for _ in range(n):
+            log_serve(db, prompt="p", sha="a" * 40)
+        per_log = (time.perf_counter() - t) / n
+        errors = []
+
+        def work(k):
+            for i in range(100):
+                try:
+                    log_serve(db, prompt="p", sha="a" * 40, request_id=f"{k}-{i}")
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(exc)
+
+        threads = [threading.Thread(target=work, args=(k,)) for k in range(8)]
+        [x.start() for x in threads]
+        [x.join() for x in threads]
+    text = "x " * 2_500_000
+    t = time.perf_counter()
+    safety.find_hidden(text)
+    scan = time.perf_counter() - t
+    out["log"] = {
+        "log_serve_ms": per_log * 1e3,
+        "concurrent_errors": len(errors),
+        "concurrent_writes": 800,
+        "scan_5mb_s": scan,
+    }
+    return (
+        "| Serving-log append (`log_serve`) | 8 threads x 100 appends, failures | "
+        "hidden-character scan of a 5 MB prompt |\n|---|---|---|\n"
+        f"| {per_log * 1e3:.2f} ms | {len(errors)} of 800 | {scan:.2f} s |"
+    )
+
+
 def runtime_cost() -> tuple[str, dict]:
     lines = [
         "| Prompts in bundle | get()+render() per request | full re-verify (`check()`) |",
@@ -589,9 +649,12 @@ def runtime_cost() -> tuple[str, dict]:
                 samples.append(time.perf_counter() - t)
             check = statistics.median(samples)
         lines.append(f"| {n} | {per_req * 1e6:.1f} us | {check * 1e3:.2f} ms |")
-        out[n] = {"get_render_us": per_req * 1e6, "check_ms": check * 1e3}
+        out[str(n)] = {"get_render_us": per_req * 1e6, "check_ms": check * 1e3}
+    lines.append("")
+    lines.append(_logging_cost(out))
     lines.append("")
     lines.append(
+        f"Load average when this ran: {_load()}. "
         "Median wall time on the machine that ran the benchmark (single thread, Python); "
         "re-run to compare on yours. `check()` runs every `reverify_interval` seconds "
         "(default 30), "

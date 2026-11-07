@@ -7,7 +7,7 @@ import datetime
 import sys
 from pathlib import Path
 
-from promptpin import deploys, gitutil, registry, safety, statedb, yamlsafe
+from promptpin import deploys, fsutil, gitutil, registry, safety, statedb, yamlsafe
 from promptpin import diff as diffmod
 from promptpin import validate as validatemod
 from promptpin.config import (
@@ -17,6 +17,22 @@ from promptpin.config import (
     Config,
 )
 from promptpin.errors import PromptpinError
+
+
+def _github_annotation(level: str, title: str, message: str) -> str:
+    """One GitHub Actions workflow command (``::error title=..::..``).
+
+    Text comes from untrusted files, so it is made terminal-safe first and the
+    characters that end or split a workflow command are percent-encoded, as the
+    workflow-command syntax requires.
+    """
+
+    def enc(text: object, prop: bool) -> str:
+        out = safety.one_line(text).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        return out.replace(":", "%3A").replace(",", "%2C") if prop else out
+
+    kind = "error" if level == "error" else "warning"
+    return f"::{kind} title={enc(title, True)}::{enc(message, False)}"
 
 
 def _say(text: object = "") -> None:
@@ -182,6 +198,13 @@ def cmd_validate(args) -> int:
     top = _repo(args)
     findings = validatemod.validate_all(top)
     ok = validatemod.is_clean(findings, strict=args.strict)
+    if args.github:
+        for f in findings:
+            level = "error" if f.level == "error" or args.strict else "warning"
+            print(_github_annotation(level, f"promptpin validate: {f.prompt}", f.message))
+        if ok and not findings:
+            _say("all prompts valid")
+        return 0 if ok else 1
     if args.json:
         import json
 
@@ -222,6 +245,14 @@ def cmd_verify(args) -> int:
     errors = [c for c in checks if c.level == "error"]
     warnings = [c for c in checks if c.level == "warning"]
     ok = not errors and not (args.strict and warnings)
+    if args.github:
+        for c in checks:
+            where = f"{c.env}/{c.prompt}" if c.prompt != "-" else c.env
+            level = "error" if c.level == "error" or args.strict else "warning"
+            print(_github_annotation(level, f"promptpin verify: {where}", c.message))
+        if ok and not checks:
+            _say("verified: every pin re-derived from git matches the lock")
+        return 0 if ok else 1
     if args.json:
         import json
 
@@ -420,7 +451,7 @@ def cmd_lock(args) -> int:
         },
     }
     out = Path(args.out)
-    out.write_text(yamlsafe.dump(manifest), encoding="utf-8")
+    fsutil.atomic_write_text(out, yamlsafe.dump(manifest))
     _say(f"wrote {out} ({len(prompts)} prompts for {args.env})")
     return 0
 
@@ -724,6 +755,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--strict", action="store_true", help="fail on warnings too")
     s.add_argument("--json", action="store_true", help="machine-readable output")
+    s.add_argument(
+        "--github", action="store_true", help="print GitHub Actions annotations (::error ...)"
+    )
     s.set_defaults(func=cmd_validate)
 
     s = sub.add_parser(
@@ -744,6 +778,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--strict", action="store_true", help="fail on warnings too")
     s.add_argument("--json", action="store_true", help="machine-readable output")
+    s.add_argument(
+        "--github", action="store_true", help="print GitHub Actions annotations (::error ...)"
+    )
     s.set_defaults(func=cmd_verify)
 
     s = sub.add_parser("release", help="tag the current (or given) commit as a version")

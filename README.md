@@ -78,9 +78,16 @@ promptpin review --base origin/main                      # plain-language Markdo
 - **Fail policy.** `raise` (default) serves nothing on a failed check. `last_good` keeps serving the
   last bundle that passed every check, marks receipts `verified=False`, and never serves unverified
   bytes; a failure at startup always raises.
-- **Per-request cost** is one SHA-256 of the template (about 6-9 microseconds including render); the
-  bundle is fully re-read at most every `reverify_interval` seconds (default 30). See
-  [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
+- **Per-request cost** is one SHA-256 of the template (microseconds, plus render); the bundle is fully
+  re-read at most every `reverify_interval` seconds (default 30) by one thread while the others keep
+  serving the last verified copy. Timings are noisy on a busy machine; the load average is printed next
+  to them in [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
+- **Writing the serving log is cheap and concurrent-safe.** `log_serve` / `Receipt.log` keep one SQLite
+  connection per thread (WAL, busy timeout): about 0.1-0.2 ms per append instead of about 25 ms on the test machine, and 8
+  threads x 100 appends gave 0 failures (they used to fail with "database is locked"). Pass
+  `on_error="ignore"` to prefer availability over a complete log.
+- **Hostile values.** `served.render(..., scan_values="error")` refuses variable values that contain
+  bidi/zero-width/tag characters or terminal escapes (default `"off"`: values are substituted as given).
 - **JavaScript.** `js/promptpin-verify.mjs` (Node 18+, zero dependencies) verifies the same bundle
   (`manifest.json` is exported next to `manifest.yaml`) and renders text and chat prompts with the same
   `promptpin.*` attributes. A parity test checks digests and rendering against Python.
@@ -99,6 +106,9 @@ GitHub Actions sketch (run on pull requests, full fetch):
 - run: promptpin review --base origin/main > review.md   # post as a PR comment with your tool of choice
 ```
 
+`validate` and `verify` also take `--github`, which prints `::error`/`::warning` annotations that GitHub
+shows on the pull request (text is made terminal-safe and percent-encoded first).
+
 Add a `CODEOWNERS` entry for `prompts/` and `promptpin.lock` so the prompt owner must approve; promptpin
 cannot see GitHub approvals offline.
 
@@ -116,7 +126,7 @@ goes, your version history goes with it.
 Measured, not claimed ([benchmarks/RESULTS.md](benchmarks/RESULTS.md), re-run with
 `python benchmarks/run.py`): 20 tamper scenarios (lock edits, bundle edits, bidi/zero-width/tag
 characters, unmerged-branch pins, drifted serving logs, forged attestations) — the 0.2.0 defences caught
-16, 0.3 catches 20. For whitespace noise, an exact template hash reports 33% of cosmetic edits as
+16 of 21, 0.3 catches 21 (the new row is a Cyrillic look-alike letter, caught as a `validate --strict` warning). For whitespace noise, an exact template hash reports 33% of cosmetic edits as
 changes; the canonical form used by `diff`/`review` reports 0% and missed 0 of 27 real edits (pins stay
 exact either way). Small corpus; it shows the mechanism, not a field rate.
 
@@ -143,7 +153,7 @@ Checked November 2026.
 | Prompt includes / composition | — | prompt references | — | — | — | — |
 | Hidden-Unicode / bidi scan | yes | — | — | — | — | — |
 | Offline CI check that pins match source | `promptpin verify` | — | — | — | — | — |
-| Content hash of the served prompt exposed | `sha` + config `digest` + rendered hash per request | not in `Prompt_Text` fields (langfuse 5.2.0, checked) | not in `PromptVersion` attributes (mlflow-skinny 3.18.0, checked) | unverified | — | git SHA |
+| Content hash of the served prompt exposed | `sha` + config `digest` + rendered hash per request | not in `Prompt_Text` fields (langfuse 5.2.0, checked) | not in `PromptVersion` attributes (mlflow-skinny 3.18.0, checked) | no hash field in the SDK's prompt-template types (promptlayer 1.5.17, checked; server side unverified) | — | git SHA |
 | Trace shows which prompt served | `promptpin.*` span attributes (you call `annotate_span`) | name + version ([docs](https://langfuse.com/docs/prompt-management/features/link-to-traces)); no hash mentioned | unverified | unverified | — | — |
 | Offline check that served requests were the pinned ones | `log verify` | — | — | — | — | — |
 | License | MIT | unverified | unverified | commercial service | MIT | FSL-1.1-MIT |
@@ -225,7 +235,7 @@ promptpin versions classifier          # all released versions
 promptpin show classifier@v2 --var ticket_text="login broken"
 promptpin status                      # what's pinned where
 promptpin history --env production    # deploy ledger
-promptpin validate                    # schema, variables, hidden chars, secrets (exit 1 on error)
+promptpin validate                    # schema, variables, hidden chars, look-alike letters, secrets (exit 1 on error)
 promptpin validate --strict --json    # warnings fail too; machine-readable
 promptpin verify --env production     # lock file vs git: hashes, SHAs, tags, envs
 promptpin audit --prompt classifier   # git history + deploys: who changed what
@@ -343,7 +353,9 @@ evals, serving log) and the deploy mutex.
   frozen at the deploy-time SHA, but prefer tags/SHAs for production.
 - **The hidden-character scan targets known-invisible code points** (bidi
   controls, zero-width, Unicode tags, C0/C1 controls). It does not detect
-  homoglyphs (e.g. Cyrillic "а" for Latin "a"). Zero-width joiners are only
+  full-script homoglyphs. A *word* that mixes Latin with Cyrillic or Greek letters (e.g. a Cyrillic "а"
+  inside "password") is a `validate` warning (fails under `--strict`), not an error: legitimate mixed
+  words exist, and other scripts and UTS #39 confusables are not checked. Zero-width joiners are only
   warnings because emoji sequences use them legitimately.
 - **Bundle digests are unkeyed SHA-256, not signatures.** They catch drift
   and casual edits; someone who can rewrite the whole bundle can recompute
@@ -363,6 +375,11 @@ evals, serving log) and the deploy mutex.
   shared secret (anyone who can verify can forge) and Sigstore/public-key signing is not implemented.
 - **`--require-signed` relies on your git signing setup** (GPG or SSH allowed-signers). It could not be
   exercised end to end in the development sandbox (mapping of git's status codes is unit-tested).
+- **Files over 2 MiB are rejected** (prompts, lock, manifests, templates): a hostile or accidental huge
+  file must not stall a CI gate or a request path. Very deeply nested YAML is a normal error, not a crash.
+- **The app-side serving log is a SQLite WAL database.** Copy `state.db` together with `state.db-wal` and
+  `state.db-shm` (or run `PRAGMA wal_checkpoint(TRUNCATE)` first) before using `log verify` on another
+  machine, or recent rows can be missing. Not tested on read-only media.
 - **Canonical form is for classification only.** A "whitespace-only" change still changes the bytes the
   model receives, so it is a new pin like any other.
 - **JavaScript parity** covers validate-clean prompts and string variables (`str(True)` is `True` in
@@ -377,7 +394,7 @@ evals, serving log) and the deploy mutex.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 288 tests
+pytest            # 313 tests + 1 skipped (about 4 minutes; most of it is creating throwaway git repos)
 ruff check src tests
 ruff format --check src tests
 ```

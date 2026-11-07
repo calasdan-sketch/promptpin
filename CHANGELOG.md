@@ -17,6 +17,33 @@
   checks the two manifests agree.
 - `benchmarks/run.py` with committed `RESULTS.md` (tamper matrix, false drift, runtime cost).
 
+### Round 3 (hostile-input, availability and performance review)
+Fixed
+- `PinnedPrompts(on_failure="last_good")` crashed on a corrupt or deeply nested `manifest.yaml`
+  (`yaml.YAMLError` / `RecursionError` escaped the failure policy). Any exception during a re-check now
+  counts as a failed check. A bundle replaced on disk is retried once before it is called tampered.
+- `log_serve` raised `database is locked` under concurrent writers and cost about 25 ms per call. It now
+  keeps a per-thread connection (WAL, busy timeout, schema set up once, re-opens a deleted or replaced
+  file) at about 0.1-0.2 ms. New `on_error="ignore"`.
+- A slow full re-verify no longer blocks every `get()`: one thread re-reads, the rest serve the last
+  verified bundle. Under `on_failure="raise"` every caller raises while the last check is failed.
+- `validate` took over a minute on a 10 MB prompt and crashed with a traceback on deeply nested YAML.
+  The hidden-character scan is linear (seconds to well under a second), nesting is a normal error.
+- Lock file, manifests and exported templates are written atomically, as bytes (no CRLF on Windows),
+  keeping the file mode. An unreadable lock file is a `DeployError`, not a traceback.
+Added
+- `validate` warns about look-alike words (Latin mixed with Cyrillic/Greek), malformed placeholders such as
+  `{{user.name}}` (sent to the model literally), and errors on NaN/infinity in `params`.
+- `served.render(..., scan_values="error")`, `PinnedPrompts.render(name, ...)`.
+- `validate --github` / `verify --github` annotations; `verify --bundle` warns about unlisted
+  `*.template.md` files.
+- Benchmark: look-alike attack row, `validate --strict` column, log-append cost, concurrent-writer failures,
+  scan speed, load average.
+Behaviour changes
+- Files over 2 MiB (`yamlsafe.MAX_FILE_BYTES`) are rejected everywhere promptpin parses them.
+- The app-side serving log (`log_serve`) now uses WAL journaling, like the CLI's own database already did.
+- `render(...)` has a keyword-only `scan_values` argument, so a template variable cannot be called that.
+
 ### Compatibility
 - Pins, lock files and bundles from 0.2.0 stay valid. Existing serving databases are migrated in place.
 

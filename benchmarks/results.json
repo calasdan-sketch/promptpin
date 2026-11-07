@@ -19,21 +19,27 @@
   },
   "runtime": {
     "1": {
-      "check_ms": 1.9626449993666029,
-      "get_render_us": 8.797374550067616
+      "check_ms": 1.2682980004683486,
+      "get_render_us": 23.65136875000644
     },
     "10": {
-      "check_ms": 9.113070998864714,
-      "get_render_us": 6.349162599963165
+      "check_ms": 15.509922999626724,
+      "get_render_us": 21.947193549976873
     },
     "100": {
-      "check_ms": 115.80380700070236,
-      "get_render_us": 6.571784949937864
+      "check_ms": 196.52876799955266,
+      "get_render_us": 27.42724234999514
+    },
+    "log": {
+      "concurrent_errors": 0,
+      "concurrent_writes": 800,
+      "log_serve_ms": 0.15598354599933373,
+      "scan_5mb_s": 0.08923005100041337
     }
   },
   "tamper": {
-    "attacks": 20,
+    "attacks": 21,
     "caught_0_2_0": 16,
-    "caught_now": 20
+    "caught_now": 21
   }
 }

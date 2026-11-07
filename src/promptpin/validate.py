@@ -7,6 +7,7 @@ restricted keys.
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -86,8 +87,65 @@ def _hidden_findings(prompt: registry.Prompt) -> list[Finding]:
     return findings
 
 
+_PLACEHOLDER_LIKE = re.compile(r"\{\{[^{}\n]*\}\}")
+
+
+def _nonfinite(value: object, depth: int = 0) -> bool:
+    if depth > 50:
+        return False
+    if isinstance(value, float):
+        return not math.isfinite(value)
+    if isinstance(value, dict):
+        return any(_nonfinite(v, depth + 1) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_nonfinite(v, depth + 1) for v in value)
+    return False
+
+
+def _extra_findings(prompt: registry.Prompt) -> list[Finding]:
+    findings: list[Finding] = []
+    for m in _PLACEHOLDER_LIKE.finditer(prompt.template):
+        if not registry.VARIABLE_RE.fullmatch(m.group()):
+            line = prompt.template[: m.start()].count("\n") + 1
+            shown = safety.one_line(m.group())[:40]
+            findings.append(
+                Finding(
+                    "warning",
+                    prompt.name,
+                    f"{shown} on line {line} is not a valid placeholder (use {{{{name}}}} with"
+                    " letters, digits and underscores) and will be sent to the model as written",
+                )
+            )
+    if _nonfinite(prompt.params):
+        findings.append(
+            Finding(
+                "error",
+                prompt.name,
+                "params contain NaN or infinity, which JSON (and other-language verifiers) cannot"
+                " represent",
+            )
+        )
+    for field_name, text in (("template", prompt.template), ("description", prompt.description)):
+        mixed = safety.find_mixed_script(text or "")
+        if mixed:
+            index, word = mixed[0]
+            line = text[:index].count("\n") + 1
+            shown = word.encode("ascii", "backslashreplace").decode("ascii")[:40]
+            more = f" (+{len(mixed) - 1} more)" if len(mixed) > 1 else ""
+            findings.append(
+                Finding(
+                    "warning",
+                    prompt.name,
+                    f"{field_name} line {line}: word '{shown}' mixes Latin with Cyrillic/Greek"
+                    f" letters{more} - a possible look-alike (homoglyph) swap that reviewers"
+                    " cannot see",
+                )
+            )
+    return findings
+
+
 def validate_prompt(prompt: registry.Prompt) -> list[Finding]:
-    findings: list[Finding] = _hidden_findings(prompt)
+    findings: list[Finding] = _hidden_findings(prompt) + _extra_findings(prompt)
     declared = set(prompt.variables)
     used = set(prompt.template_variables())
     for var in sorted(used - declared):

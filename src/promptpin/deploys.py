@@ -29,7 +29,8 @@ from pathlib import Path
 
 import yaml
 
-from promptpin import gitutil, registry, statedb, yamlsafe
+from promptpin import fsutil, gitutil, registry, safety, statedb, yamlsafe
+from promptpin.client import load_bundle_with_manifest
 from promptpin.config import LOCK_FILENAME, Config, deploy_lock_path
 from promptpin.errors import DeployError, InvalidPromptError, LockError, VersionNotFoundError
 
@@ -98,7 +99,11 @@ def read_lock(repo_root: Path) -> dict:
     path = repo_root / LOCK_FILENAME
     if not path.exists():
         return {}
-    return parse_lock(path.read_text(encoding="utf-8"))
+    try:
+        text = yamlsafe.decode(path.read_bytes(), LOCK_FILENAME)
+    except (OSError, ValueError) as exc:
+        raise DeployError(f"cannot read {LOCK_FILENAME}: {exc}") from None
+    return parse_lock(text)
 
 
 def parse_lock(text: str) -> dict:
@@ -134,7 +139,7 @@ def write_lock(repo_root: Path, pins: dict) -> None:
             for env, prompts in pins.items()
         },
     }
-    (repo_root / LOCK_FILENAME).write_text(yamlsafe.dump(data), encoding="utf-8")
+    fsutil.atomic_write_text(repo_root / LOCK_FILENAME, yamlsafe.dump(data))
 
 
 @contextmanager
@@ -292,7 +297,7 @@ def export_bundle(repo_root: Path, env: str, out_dir: Path) -> dict:
         filename = f"{name}.template.md"
         # Bytes, not text mode: text mode would translate newlines on Windows
         # (and CRLF templates anywhere), breaking the hash check at load time.
-        (out_dir / filename).write_bytes(prompt.template.encode("utf-8"))
+        fsutil.atomic_write_bytes(out_dir / filename, prompt.template.encode("utf-8"))
         manifest_prompts[name] = {
             "sha": pin.sha,
             "ref": pin.ref,
@@ -308,7 +313,7 @@ def export_bundle(repo_root: Path, env: str, out_dir: Path) -> dict:
         "bundle_digest": bundle_digest(manifest_prompts),
         "prompts": manifest_prompts,
     }
-    (out_dir / "manifest.yaml").write_text(yamlsafe.dump(manifest), encoding="utf-8")
+    fsutil.atomic_write_text(out_dir / "manifest.yaml", yamlsafe.dump(manifest))
     # JSON twin for runtimes without a YAML parser (see js/promptpin-verify.mjs).
     # `digest_input` is the exact string `digest` hashes, so no verifier has to
     # re-serialise params identically to Python.
@@ -327,9 +332,9 @@ def export_bundle(repo_root: Path, env: str, out_dir: Path) -> dict:
     }
     import json as _json
 
-    (out_dir / "manifest.json").write_text(
+    fsutil.atomic_write_text(
+        out_dir / "manifest.json",
         _json.dumps(json_manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
-        encoding="ascii",
     )
     return {
         "env": env,
@@ -552,8 +557,6 @@ def verify_lock(
     signature on every pinned commit and on the newest commit touching the
     lock file. An unresolvable ``reachable_from`` is an error, not a skip.
     """
-    from promptpin.client import load_bundle
-
     top = gitutil.ensure_repo(repo_root)
     cfg = Config.load(top)
     checks: list[Check] = []
@@ -630,7 +633,7 @@ def verify_lock(
         checks.append(Check("warning", env_name, name, msg))
 
     if bundle_dir is not None:
-        checks.extend(_verify_bundle(pins, bundle_dir, env, load_bundle))
+        checks.extend(_verify_bundle(pins, bundle_dir, env))
     return checks
 
 
@@ -651,12 +654,10 @@ def _signature_check(add, what: str, code: str, signer: str) -> None:
     add("error", f"{what} {reasons.get(code, 'has an unrecognised signature status')}")
 
 
-def _verify_bundle(pins: dict, bundle_dir: Path, env: str | None, load_bundle) -> list[Check]:
+def _verify_bundle(pins: dict, bundle_dir: Path, env: str | None) -> list[Check]:
     checks: list[Check] = []
-    manifest_path = Path(bundle_dir) / "manifest.yaml"
     try:
-        bundle = load_bundle(bundle_dir)
-        manifest = yamlsafe.load(manifest_path.read_text(encoding="utf-8")) or {}
+        bundle, manifest = load_bundle_with_manifest(bundle_dir)
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return [Check("error", env or "-", "-", f"bundle: {exc}")]
     bundle_env = manifest.get("env") if isinstance(manifest, dict) else None
@@ -690,6 +691,26 @@ def _verify_bundle(pins: dict, bundle_dir: Path, env: str | None, load_bundle) -
             checks.append(
                 Check("error", bundle_env, "-", "manifest.json differs from manifest.yaml")
             )
+    try:
+        listed = {f"{n}.template.md" for n in bundle}
+        strays = sorted(
+            f.name
+            for f in Path(bundle_dir).iterdir()
+            if f.name.endswith(".template.md") and f.name not in listed
+        )
+    except OSError:
+        strays = []
+    if strays:
+        shown = ", ".join(safety.one_line(s) for s in strays[:3])
+        checks.append(
+            Check(
+                "warning",
+                bundle_env,
+                "-",
+                f"bundle holds template file(s) the manifest does not list ({shown}):"
+                " delete them, nothing verifies their contents",
+            )
+        )
     for name in sorted(set(expected) | set(bundle)):
         if name not in bundle:
             checks.append(Check("error", bundle_env, name, "pinned but missing from bundle"))

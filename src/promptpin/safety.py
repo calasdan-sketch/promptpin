@@ -19,6 +19,7 @@ Two jobs:
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from dataclasses import dataclass
 
@@ -94,12 +95,22 @@ def classify(ch: str) -> tuple[str, str] | None:
     return None
 
 
+#: Anything that is not printable ASCII, a tab or a newline. Only these can be
+#: hidden characters, so a scan jumps from candidate to candidate instead of
+#: classifying every character (10 MB of ASCII: seconds, not minutes).
+_CANDIDATE = re.compile(r"[^\x20-\x7e\t\n]")
+
+
 def find_hidden(text: str) -> list[HiddenChar]:
     """Every suspicious invisible/control character in ``text``, in order."""
     found = []
     n = len(text)
     i = 0
     while i < n:
+        m = _CANDIDATE.search(text, i)
+        if m is None:
+            break
+        i = m.start()
         ch = text[i]
         cp = ord(ch)
         if is_variation_selector(cp):
@@ -156,3 +167,39 @@ def sanitize(text: object, keep_newlines: bool = True) -> str:
 def one_line(text: object) -> str:
     """``sanitize`` for single-line fields (notes, actors, commit subjects)."""
     return sanitize(text, keep_newlines=False)
+
+
+_WORD = re.compile(r"\w+")
+_CONFUSABLE_SCRIPTS = ("LATIN", "CYRILLIC", "GREEK")
+
+
+def _script(ch: str) -> str | None:
+    if ch.isascii():
+        return "LATIN" if ch.isalpha() else None
+    if not ch.isalpha():
+        return None
+    first = unicodedata.name(ch, "").split(" ", 1)[0]
+    return first if first in _CONFUSABLE_SCRIPTS else None
+
+
+def find_mixed_script(text: str) -> list[tuple[int, str]]:
+    """Words that mix Latin with Cyrillic or Greek letters, as ``(index, word)``.
+
+    ``p\u0430ssword`` with a Cyrillic "a" looks identical to the Latin word
+    but is a different string: a classic look-alike (homoglyph) trick. Only
+    these three scripts are checked, because they hold nearly all of the
+    look-alikes for Latin letters; this is a tripwire, not a full confusables
+    check (UTS #39), and legitimate mixed-script words (a product name, a
+    unit such as "\u00b5m") produce warnings, never errors.
+    """
+    if text.isascii():
+        return []
+    hits = []
+    for m in _WORD.finditer(text):
+        word = m.group()
+        if word.isascii():
+            continue
+        scripts = {sc for ch in word if (sc := _script(ch))}
+        if len(scripts) > 1:
+            hits.append((m.start(), word))
+    return hits

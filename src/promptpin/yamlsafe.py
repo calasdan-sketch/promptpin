@@ -28,8 +28,21 @@ class NoAliasSafeLoader(yaml.SafeLoader):
 
 
 def load(text: str):
-    """Parse one YAML document with safe types and no aliases."""
-    return yaml.load(text, Loader=NoAliasSafeLoader)  # noqa: S506 - safe loader subclass
+    """Parse one YAML document with safe types and no aliases.
+
+    Absurdly deep nesting (``[[[[...``) would otherwise surface as a
+    ``RecursionError`` traceback; it is reported as a normal YAML error.
+    """
+    try:
+        return yaml.load(text, Loader=NoAliasSafeLoader)  # noqa: S506 - safe loader subclass
+    except RecursionError:
+        raise yaml.YAMLError("YAML is nested too deeply") from None
+
+
+#: Upper bound for any single file promptpin parses or hashes (prompt, lock,
+#: manifest, template). Real prompts are a few KB; this stops a hostile or
+#: accidental 100 MB file from stalling a CI gate or a request path.
+MAX_FILE_BYTES = 2 * 1024 * 1024
 
 
 def decode(data: bytes, source: str = "") -> str:
@@ -40,6 +53,9 @@ def decode(data: bytes, source: str = "") -> str:
     is normalized; a lone ``\\r`` is kept so the hidden-character scan can
     report it instead of it silently becoming a line break.
     """
+    if len(data) > MAX_FILE_BYTES:
+        where = f"{source}: " if source else ""
+        raise ValueError(f"{where}file is {len(data):,} bytes; the limit is {MAX_FILE_BYTES:,}")
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
