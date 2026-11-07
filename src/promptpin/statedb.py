@@ -49,12 +49,23 @@ CREATE TABLE IF NOT EXISTS serving (
     latency_ms    REAL,
     tokens_in     INTEGER,
     tokens_out    INTEGER,
-    error         TEXT NOT NULL DEFAULT ''
+    error         TEXT NOT NULL DEFAULT '',
+    digest        TEXT NOT NULL DEFAULT '',
+    rendered_sha256 TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_deploys_env_prompt ON deploys (env, prompt, id);
 CREATE INDEX IF NOT EXISTS idx_evals_prompt_sha ON evals (prompt, resolved_sha);
 CREATE INDEX IF NOT EXISTS idx_serving_prompt_env_ts ON serving (prompt, env, ts);
 """
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Add serving-log columns introduced after 0.2.0 to an existing database."""
+    have = {r[1] for r in conn.execute("PRAGMA table_info(serving)")}
+    for col in ("digest", "rendered_sha256"):
+        if col not in have:
+            conn.execute(f"ALTER TABLE serving ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+    conn.commit()
 
 
 def connect(repo_root: Path) -> sqlite3.Connection:
@@ -63,6 +74,7 @@ def connect(repo_root: Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.executescript(SCHEMA)
+    migrate(conn)
     return conn
 
 
@@ -225,12 +237,27 @@ def record_serve(
     tokens_in: int | None = None,
     tokens_out: int | None = None,
     error: str = "",
+    digest: str = "",
+    rendered_sha256: str = "",
 ) -> int:
     cur = conn.execute(
         "INSERT INTO serving (ts, env, prompt, sha, model, request_id,"
-        " latency_ms, tokens_in, tokens_out, error)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (utcnow(), env, prompt, sha, model, request_id, latency_ms, tokens_in, tokens_out, error),
+        " latency_ms, tokens_in, tokens_out, error, digest, rendered_sha256)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            utcnow(),
+            env,
+            prompt,
+            sha,
+            model,
+            request_id,
+            latency_ms,
+            tokens_in,
+            tokens_out,
+            error,
+            digest,
+            rendered_sha256,
+        ),
     )
     conn.commit()
     return cur.lastrowid

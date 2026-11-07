@@ -98,8 +98,13 @@ def read_lock(repo_root: Path) -> dict:
     path = repo_root / LOCK_FILENAME
     if not path.exists():
         return {}
+    return parse_lock(path.read_text(encoding="utf-8"))
+
+
+def parse_lock(text: str) -> dict:
+    """Parse lock-file text (see ``read_lock``)."""
     try:
-        data = yamlsafe.load(path.read_text(encoding="utf-8")) or {}
+        data = yamlsafe.load(text) or {}
     except yaml.YAMLError as exc:
         raise DeployError(f"{LOCK_FILENAME} is not valid YAML (merge conflict?): {exc}") from exc
     if not isinstance(data, dict):
@@ -304,6 +309,28 @@ def export_bundle(repo_root: Path, env: str, out_dir: Path) -> dict:
         "prompts": manifest_prompts,
     }
     (out_dir / "manifest.yaml").write_text(yamlsafe.dump(manifest), encoding="utf-8")
+    # JSON twin for runtimes without a YAML parser (see js/promptpin-verify.mjs).
+    # `digest_input` is the exact string `digest` hashes, so no verifier has to
+    # re-serialise params identically to Python.
+    json_manifest = {
+        "env": env,
+        "bundle_digest": manifest["bundle_digest"],
+        "prompts": {
+            n: {
+                **m,
+                "digest_input": registry.config_digest_input(
+                    m["template_sha256"], m["model"], m["params"], m["format"]
+                ),
+            }
+            for n, m in manifest_prompts.items()
+        },
+    }
+    import json as _json
+
+    (out_dir / "manifest.json").write_text(
+        _json.dumps(json_manifest, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
+        encoding="ascii",
+    )
     return {
         "env": env,
         "out": str(out_dir),
@@ -508,6 +535,8 @@ def verify_lock(
     repo_root: Path,
     env: str | None = None,
     bundle_dir: Path | None = None,
+    reachable_from: str | None = None,
+    require_signed: bool = False,
 ) -> list[Check]:
     """Re-derive every pin from git and compare. Fails closed.
 
@@ -516,6 +545,12 @@ def verify_lock(
     name mismatch, template hash mismatch, and (with ``bundle_dir``) a bundle
     whose manifest or templates differ from the pins. Warnings: mutable refs
     and tags that moved or were deleted after deploy.
+
+    Provenance (opt-in, still offline): ``reachable_from="origin/main"`` makes
+    a pin whose commit is not an ancestor of that ref an error (it never went
+    through the reviewed branch); ``require_signed=True`` requires a good git
+    signature on every pinned commit and on the newest commit touching the
+    lock file. An unresolvable ``reachable_from`` is an error, not a skip.
     """
     from promptpin.client import load_bundle
 
@@ -570,12 +605,50 @@ def verify_lock(
                 add("warning", "pin has no digest (deployed by promptpin < 0.2) — redeploy it")
             if pin.mutable_ref:
                 add("warning", f"deployed from mutable ref {pin.ref!r} (frozen at {pin.sha[:7]})")
+            if reachable_from is not None:
+                try:
+                    if not gitutil.is_ancestor(top, pin.sha, reachable_from):
+                        add(
+                            "error",
+                            f"pinned commit {pin.sha[:7]} is not reachable from"
+                            f" {reachable_from!r} — never merged through the reviewed branch",
+                        )
+                except VersionNotFoundError as exc:
+                    add("error", f"cannot check reachability: {exc}")
+            if require_signed:
+                code, signer = gitutil.signature_status(top, pin.sha)
+                _signature_check(add, f"pinned commit {pin.sha[:7]}", code, signer)
+    if require_signed:
+        code, signer = gitutil.signature_status(top, "HEAD", LOCK_FILENAME)
+        _signature_check(
+            lambda level, msg: checks.append(Check(level, env or "-", "-", msg)),
+            f"newest commit touching {LOCK_FILENAME}",
+            code,
+            signer,
+        )
     for env_name, name, msg in _tag_issues(top, pins):
         checks.append(Check("warning", env_name, name, msg))
 
     if bundle_dir is not None:
         checks.extend(_verify_bundle(pins, bundle_dir, env, load_bundle))
     return checks
+
+
+def _signature_check(add, what: str, code: str, signer: str) -> None:
+    if code == "G":
+        return
+    if code == "U":
+        add("warning", f"{what} has a valid signature from an untrusted key")
+        return
+    reasons = {
+        "N": "is not signed",
+        "B": "has a BAD signature",
+        "X": "has an expired signature",
+        "Y": "was signed with an expired key",
+        "R": "was signed with a revoked key",
+        "E": "has a signature that cannot be checked (missing key/allowed-signers?)",
+    }
+    add("error", f"{what} {reasons.get(code, 'has an unrecognised signature status')}")
 
 
 def _verify_bundle(pins: dict, bundle_dir: Path, env: str | None, load_bundle) -> list[Check]:
@@ -595,6 +668,28 @@ def _verify_bundle(pins: dict, bundle_dir: Path, env: str | None, load_bundle) -
     expected = pins.get(bundle_env) or {}
     if not expected:
         return [Check("error", str(bundle_env), "-", "bundle env has no pins in the lock file")]
+    json_path = Path(bundle_dir) / "manifest.json"
+    if json_path.exists():
+        import json as _json
+
+        try:
+            twin = _json.loads(json_path.read_text(encoding="utf-8"))
+            twin_ok = (
+                twin.get("bundle_digest") == manifest.get("bundle_digest")
+                and twin.get("env") == bundle_env
+                and set(twin.get("prompts", {})) == set(bundle)
+                and all(
+                    twin["prompts"][n].get(k) == bundle[n].get(k)
+                    for n in bundle
+                    for k in ("sha", "digest", "template_sha256")
+                )
+            )
+        except (OSError, ValueError, AttributeError, TypeError):
+            twin_ok = False
+        if not twin_ok:
+            checks.append(
+                Check("error", bundle_env, "-", "manifest.json differs from manifest.yaml")
+            )
     for name in sorted(set(expected) | set(bundle)):
         if name not in bundle:
             checks.append(Check("error", bundle_env, name, "pinned but missing from bundle"))

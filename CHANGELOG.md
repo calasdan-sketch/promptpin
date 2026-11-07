@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.3.0 — unreleased
+
+### Added
+- `PinnedPrompts` runtime verifier: startup + per-request checks, periodic full re-verify,
+  `raise` / `last_good` failure policy, `Receipt` (commit, digests, rendered-prompt hash),
+  `Receipt.annotate_span()` (OpenTelemetry, optional) and `Receipt.log()`.
+- `promptpin log verify`: fails when the serving log holds requests for a non-pinned commit, drifted
+  config digest or unpinned prompt. Serving log gains `digest` and `rendered_sha256` columns (auto-migrated).
+- `verify --reachable-from REF` and `verify --require-signed` (offline provenance).
+- `promptpin attest` / `attest-verify`: in-toto Statement v1 in a DSSE envelope, HMAC-SHA256 signed;
+  `PinnedPrompts(attestation=..., attestation_key=...)`.
+- `promptpin review --base REF`: plain-language, injection-safe Markdown for PR review.
+- Whitespace-canonical classification (`promptpin.canon`); `diff` flags whitespace-only changes.
+- `export` also writes `manifest.json`; `js/promptpin-verify.mjs` Node verifier; `verify --bundle`
+  checks the two manifests agree.
+- `benchmarks/run.py` with committed `RESULTS.md` (tamper matrix, false drift, runtime cost).
+
+### Compatibility
+- Pins, lock files and bundles from 0.2.0 stay valid. Existing serving databases are migrated in place.
+
 ## 0.2.0 — unreleased
 
 ### Panel review fixes (second pass)

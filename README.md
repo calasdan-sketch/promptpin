@@ -52,6 +52,56 @@ $ promptpin verify --env production --bundle ./prompt-bundle
 verify FAILED (1 error(s), 0 warning(s))
 ```
 
+## Prove what production actually served (new in 0.3)
+
+A pin proves what *should* run. 0.3 adds the other half: evidence of what *did*.
+
+```python
+from promptpin import PinnedPrompts
+
+pp = PinnedPrompts("./prompt-bundle", expected_digest=PROMPT_BUNDLE_DIGEST,
+                   env="production", on_failure="raise")   # or "last_good"
+text, receipt = pp.get("classifier").render(ticket_text=ticket)
+receipt.annotate_span()                    # sets promptpin.* attributes on the current OpenTelemetry span, if installed
+receipt.log("./state.db", request_id=req.id)   # sha + config digest + rendered-prompt hash
+```
+
+```bash
+promptpin log verify --env production --db ./state.db   # fails if any request used a non-pinned commit/config
+promptpin verify --reachable-from origin/main            # pinned commits must have been merged through the reviewed branch
+promptpin verify --require-signed                        # pinned commits + newest lock commit need good git signatures
+promptpin attest --env production --out att.json         # in-toto statement in a DSSE envelope, HMAC-signed (shared key)
+promptpin attest-verify att.json --bundle ./prompt-bundle
+promptpin review --base origin/main                      # plain-language Markdown of pin changes, for PR comments
+```
+
+- **Fail policy.** `raise` (default) serves nothing on a failed check. `last_good` keeps serving the
+  last bundle that passed every check, marks receipts `verified=False`, and never serves unverified
+  bytes; a failure at startup always raises.
+- **Per-request cost** is one SHA-256 of the template (about 6-9 microseconds including render); the
+  bundle is fully re-read at most every `reverify_interval` seconds (default 30). See
+  [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
+- **JavaScript.** `js/promptpin-verify.mjs` (Node 18+, zero dependencies) verifies the same bundle
+  (`manifest.json` is exported next to `manifest.yaml`) and renders text and chat prompts with the same
+  `promptpin.*` attributes. A parity test checks digests and rendering against Python.
+- **Review for non-engineers.** `promptpin review` says "Wording changed: 2 lines added", "Settings
+  changed: params.temperature", "Whitespace-only change", warns about invisible characters, and prints the
+  undo command. Prompt text is escaped and fenced. `promptpin diff` also flags whitespace-only changes.
+
+GitHub Actions sketch (run on pull requests, full fetch):
+
+```yaml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }
+- run: pip install promptpin
+- run: promptpin validate --strict
+- run: promptpin verify --env production --reachable-from origin/main
+- run: promptpin review --base origin/main > review.md   # post as a PR comment with your tool of choice
+```
+
+Add a `CODEOWNERS` entry for `prompts/` and `promptpin.lock` so the prompt owner must approve; promptpin
+cannot see GitHub approvals offline.
+
 ## Why not Langfuse / PromptLayer / MLflow?
 
 They're good tools — but your prompts live in *their* database. Self-hosted
@@ -62,6 +112,13 @@ its SDK serves a cached prompt that can be up to 60 s stale by default
 sunset its platform on 8 September 2025 and removed customer data afterwards
 ([announcement thread](https://hn.svelte.dev/item/44592216)) — when the vendor
 goes, your version history goes with it.
+
+Measured, not claimed ([benchmarks/RESULTS.md](benchmarks/RESULTS.md), re-run with
+`python benchmarks/run.py`): 20 tamper scenarios (lock edits, bundle edits, bidi/zero-width/tag
+characters, unmerged-branch pins, drifted serving logs, forged attestations) — the 0.2.0 defences caught
+16, 0.3 catches 20. For whitespace noise, an exact template hash reports 33% of cosmetic edits as
+changes; the canonical form used by `diff`/`review` reports 0% and missed 0 of 27 real edits (pins stay
+exact either way). Small corpus; it shows the mechanism, not a field rate.
 
 promptpin's bet: **the registry is the git repo you already have.**
 Prompt changes go through PR review. `git log -p promptpin.lock` *is* your
@@ -86,6 +143,9 @@ Checked November 2026.
 | Prompt includes / composition | — | prompt references | — | — | — | — |
 | Hidden-Unicode / bidi scan | yes | — | — | — | — | — |
 | Offline CI check that pins match source | `promptpin verify` | — | — | — | — | — |
+| Content hash of the served prompt exposed | `sha` + config `digest` + rendered hash per request | not in `Prompt_Text` fields (langfuse 5.2.0, checked) | not in `PromptVersion` attributes (mlflow-skinny 3.18.0, checked) | unverified | — | git SHA |
+| Trace shows which prompt served | `promptpin.*` span attributes (you call `annotate_span`) | name + version ([docs](https://langfuse.com/docs/prompt-management/features/link-to-traces)); no hash mentioned | unverified | unverified | — | — |
+| Offline check that served requests were the pinned ones | `log verify` | — | — | — | — | — |
 | License | MIT | unverified | unverified | commercial service | MIT | FSL-1.1-MIT |
 
 ## Concepts
@@ -298,6 +358,15 @@ evals, serving log) and the deploy mutex.
 - **Secret scanning is a best-effort heuristic** (`validate` warns on
   obvious patterns). It will miss things. Use pre-commit hooks for real
   secret hygiene, and never commit secrets in prompts.
+- **Receipts and the serving log are self-reported by the app.** They prove what the process verified
+  and rendered, not that the process is honest. A compromised app can lie; HMAC attestations use a
+  shared secret (anyone who can verify can forge) and Sigstore/public-key signing is not implemented.
+- **`--require-signed` relies on your git signing setup** (GPG or SSH allowed-signers). It could not be
+  exercised end to end in the development sandbox (mapping of git's status codes is unit-tested).
+- **Canonical form is for classification only.** A "whitespace-only" change still changes the bytes the
+  model receives, so it is a new pin like any other.
+- **JavaScript parity** covers validate-clean prompts and string variables (`str(True)` is `True` in
+  Python, `true` in JS). Template-only (`{{var}}`) rendering matches; nothing else is ported.
 - **No prompt composition** (sub-prompt includes), no traffic splitting, no
   hosted UI, no automatic eval runs, no multi-repo sharing, no RBAC. The CLI
   and the lock file are the interface.
@@ -308,7 +377,7 @@ evals, serving log) and the deploy mutex.
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 204 tests
+pytest            # 288 tests
 ruff check src tests
 ruff format --check src tests
 ```

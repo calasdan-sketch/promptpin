@@ -213,7 +213,11 @@ def cmd_validate(args) -> int:
 def cmd_verify(args) -> int:
     top = _repo(args)
     checks = deploys.verify_lock(
-        top, env=args.env, bundle_dir=Path(args.bundle) if args.bundle else None
+        top,
+        env=args.env,
+        bundle_dir=Path(args.bundle) if args.bundle else None,
+        reachable_from=args.reachable_from,
+        require_signed=args.require_signed,
     )
     errors = [c for c in checks if c.level == "error"]
     warnings = [c for c in checks if c.level == "warning"]
@@ -426,7 +430,70 @@ def cmd_export(args) -> int:
     result = deploys.export_bundle(top, args.env, Path(args.out))
     _say(f"exported {len(result['prompts'])} prompts for {args.env} → {result['out']}/")
     _say(f"bundle_digest: {result['bundle_digest']}")
-    _say("bundle with your app; load with promptpin.load_bundle(<dir>, expected_digest=...)")
+    _say("bundle with your app; load with promptpin.PinnedPrompts(<dir>, expected_digest=...)")
+    return 0
+
+
+# ------------------------------------------------- review / attest ---
+
+
+def cmd_review(args) -> int:
+    from promptpin import review as reviewmod
+
+    top = _repo(args)
+    text, ok = reviewmod.review(top, args.base, args.head)
+    print(safety.sanitize(text), end="")
+    return 0 if ok else 1
+
+
+def _read_key(env_name: str) -> bytes:
+    import os
+
+    value = os.environ.get(env_name)
+    if not value:
+        raise PromptpinError(f"environment variable {env_name} is not set (the signing key)")
+    return value.encode("utf-8")
+
+
+def cmd_attest(args) -> int:
+    import json
+
+    from promptpin import attest
+
+    top = _repo(args)
+    statement = attest.build_statement(top, args.env)
+    envelope = attest.sign(statement, _read_key(args.key_env))
+    Path(args.out).write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
+    _say(f"attested {len(statement['subject'])} prompt(s) for {args.env} → {args.out}")
+    _say(f"bundle_digest: {statement['predicate']['bundle_digest']}")
+    _say("HMAC-signed with a shared secret: anyone holding the key can also forge it")
+    return 0
+
+
+def cmd_attest_verify(args) -> int:
+    from promptpin import attest
+
+    top = _repo(args)
+    statement = attest.read_verified(args.file, _read_key(args.key_env))
+    problems = attest.check_against_repo(top, statement, args.env)
+    env = statement["predicate"].get("env")
+    checks = deploys.verify_lock(
+        top, env=env, bundle_dir=Path(args.bundle) if args.bundle else None
+    )
+    problems += [c.message for c in checks if c.level == "error"]
+    if args.bundle and not problems:
+        from promptpin.client import load_bundle
+
+        try:
+            load_bundle(args.bundle, expected_digest=statement["predicate"]["bundle_digest"])
+        except (ValueError, OSError) as exc:
+            problems.append(f"bundle: {exc}")
+    for p in problems:
+        _say(f"[error] {_one(p)}")
+    if problems:
+        _say(f"\nattestation FAILED ({len(problems)} problem(s))")
+        return 1
+    _say(f"attestation OK: signature valid and {env!r} pins match git and the lock")
     return 0
 
 
@@ -479,6 +546,26 @@ def cmd_log(args) -> int:
                 f"  n={v['count']} ({v['share']:.0%})  avg_latency={lat}"
                 f"  error_rate={v['error_rate']:.1%}"
             )
+        return 0
+    if args.log_cmd == "verify":
+        from promptpin import servecheck
+
+        checks = servecheck.verify_serving(
+            top,
+            args.env,
+            Path(args.db) if args.db else None,
+            grace_seconds=args.grace_seconds,
+            since_ts=_parse_duration(args.since) if args.since else None,
+        )
+        errors = [c for c in checks if c.level == "error"]
+        warnings = [c for c in checks if c.level == "warning"]
+        for c in checks:
+            where = f"{c.env}/{c.prompt}" if c.prompt != "-" else c.env
+            _say(f"[{c.level}] {_one(where)}: {_one(c.message)}")
+        if errors or (args.strict and warnings):
+            _say(f"\nlog verify FAILED ({len(errors)} error(s), {len(warnings)} warning(s))")
+            return 1
+        _say(f"log verify OK: every logged request in {args.env} used the pinned prompt")
         return 0
     if args.log_cmd == "prune":
         conn = statedb.connect(top)
@@ -645,6 +732,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     s.add_argument("--env", help="only this env")
     s.add_argument("--bundle", help="also check an exported bundle dir matches the pins")
+    s.add_argument(
+        "--reachable-from",
+        metavar="REF",
+        help="every pinned commit must be an ancestor of REF (e.g. origin/main)",
+    )
+    s.add_argument(
+        "--require-signed",
+        action="store_true",
+        help="every pinned commit and the newest lock-file commit need a good git signature",
+    )
     s.add_argument("--strict", action="store_true", help="fail on warnings too")
     s.add_argument("--json", action="store_true", help="machine-readable output")
     s.set_defaults(func=cmd_verify)
@@ -708,9 +805,42 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--prompt")
     ls.add_argument("--env")
     ls.add_argument("--since", help="e.g. 24h, 7d, 30m")
+    ls = log_sub.add_parser(
+        "verify", help="fail if any logged request used a prompt other than the pinned one"
+    )
+    ls.add_argument("--env", default="production")
+    ls.add_argument("--db", help="serving log to check (default: .promptpin/state.db)")
+    ls.add_argument("--since", help="only requests newer than this, e.g. 24h")
+    ls.add_argument(
+        "--grace-seconds",
+        type=float,
+        default=300.0,
+        help="ignore requests this long after a pin went live (rolling restarts)",
+    )
+    ls.add_argument("--strict", action="store_true", help="warnings fail too")
     ls = log_sub.add_parser("prune", help="delete serving events older than a duration")
     ls.add_argument("--older-than", required=True, help="e.g. 30d")
     s.set_defaults(func=cmd_log)
+
+    s = sub.add_parser(
+        "review", help="plain-language Markdown summary of pin changes versus a base ref (for PRs)"
+    )
+    s.add_argument("--base", required=True, help="ref to compare against, e.g. origin/main")
+    s.add_argument("--head", help="ref with the new lock (default: working tree)")
+    s.set_defaults(func=cmd_review)
+
+    s = sub.add_parser("attest", help="write an HMAC-signed in-toto attestation for an env's pins")
+    s.add_argument("--env", required=True)
+    s.add_argument("--out", required=True)
+    s.add_argument("--key-env", default="PROMPTPIN_ATTEST_KEY", help="env var holding the key")
+    s.set_defaults(func=cmd_attest)
+
+    s = sub.add_parser("attest-verify", help="check an attestation against the key, lock and git")
+    s.add_argument("file")
+    s.add_argument("--env")
+    s.add_argument("--bundle", help="also check this bundle dir matches the attested digest")
+    s.add_argument("--key-env", default="PROMPTPIN_ATTEST_KEY")
+    s.set_defaults(func=cmd_attest_verify)
 
     s = sub.add_parser("eval", help="eval scores")
     eval_sub = s.add_subparsers(dest="eval_cmd", required=True)

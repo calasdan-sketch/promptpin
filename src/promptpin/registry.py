@@ -43,15 +43,14 @@ ROLE_RE = re.compile(r"^[ \t]*(system|developer|user|assistant)[ \t]*:[ \t]*\r?$
 FORMATS = ("text", "chat")
 
 
-def config_digest(template_sha256: str, model: str, params: dict, fmt: str) -> str:
-    """One SHA-256 over everything that changes what the model receives.
+def config_digest_input(template_sha256: str, model: str, params: dict, fmt: str) -> str:
+    """The exact canonical JSON string that ``config_digest`` hashes.
 
-    Covers the template hash, model, params and format, as canonical JSON
-    (sorted keys, ASCII, no whitespace). A change to any of them changes the
-    digest, so a bundle or lock entry cannot swap the model or params while
-    keeping the template hash.
+    Sorted keys, ASCII-escaped, no whitespace. Other-language verifiers can
+    hash this string as-is instead of re-serialising params (Python writes
+    ``1.0`` where JavaScript writes ``1``).
     """
-    canonical = json.dumps(
+    return json.dumps(
         {
             "format": fmt or "text",
             "model": model or "",
@@ -63,6 +62,17 @@ def config_digest(template_sha256: str, model: str, params: dict, fmt: str) -> s
         separators=(",", ":"),
         default=str,
     )
+
+
+def config_digest(template_sha256: str, model: str, params: dict, fmt: str) -> str:
+    """One SHA-256 over everything that changes what the model receives.
+
+    Covers the template hash, model, params and format, as canonical JSON
+    (sorted keys, ASCII, no whitespace). A change to any of them changes the
+    digest, so a bundle or lock entry cannot swap the model or params while
+    keeping the template hash.
+    """
+    canonical = config_digest_input(template_sha256, model, params, fmt)
     return hashlib.sha256(canonical.encode("ascii")).hexdigest()
 
 
@@ -107,6 +117,13 @@ class Prompt:
     @property
     def template_sha256(self) -> str:
         return hashlib.sha256(self.template.encode("utf-8")).hexdigest()
+
+    @property
+    def canonical_sha256(self) -> str:
+        """Hash of the whitespace-canonical template (for classifying edits only)."""
+        from promptpin.canon import canonical_sha256
+
+        return canonical_sha256(self.template)
 
     @property
     def digest(self) -> str:

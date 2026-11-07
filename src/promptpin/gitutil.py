@@ -238,3 +238,42 @@ def current_actor(repo: Path) -> str:
     import getpass
 
     return getpass.getuser()
+
+
+def show_bytes(repo: Path, sha: str, relpath: str) -> bytes | None:
+    """Raw bytes of ``relpath`` at ``sha``; None when it does not exist there."""
+    check_ref(sha)
+    proc = _run_bytes(repo, "show", f"{sha}:{relpath}")
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def is_ancestor(repo: Path, sha: str, ref: str) -> bool:
+    """True when commit ``sha`` is reachable from ``ref`` (``ref`` itself counts).
+
+    Raises VersionNotFoundError when ``ref`` does not resolve, so a typo in a
+    CI gate fails closed instead of "nothing is reachable, nothing to check".
+    """
+    check_ref(ref)
+    resolved, _ = resolve_ref(repo, ref)
+    proc = _run(repo, "merge-base", "--is-ancestor", sha, resolved)
+    if proc.returncode in (0, 1):
+        return proc.returncode == 0
+    raise VersionNotFoundError(f"git merge-base failed: {proc.stderr.strip()}")
+
+
+def signature_status(repo: Path, sha: str, relpath: str | None = None) -> tuple[str, str]:
+    """``(code, signer)`` of a commit's signature, per git's ``%G?`` / ``%GS``.
+
+    ``G`` good, ``U`` good but key untrusted, ``N`` none, ``B`` bad, ``X``/``Y``
+    expired signature/key, ``R`` revoked key, ``E`` cannot be checked. With
+    ``relpath``, the newest commit at or before ``sha`` touching that path.
+    """
+    check_ref(sha)
+    args = ["log", "-1", "--format=%G?%x1f%GS", sha]
+    if relpath:
+        args += ["--", relpath]
+    proc = _run(repo, *args)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return "N", ""
+    code, _, signer = proc.stdout.strip("\n").partition("\x1f")
+    return (code or "N"), signer

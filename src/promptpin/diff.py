@@ -125,6 +125,14 @@ def render_diff(
                 f"⚠ {one(disp_b)} {count}{detail}; they are shown below as \\uXXXX escapes",
             )
         )
+    from promptpin.canon import classify_change
+
+    kind = classify_change(a, b)
+    if kind == "cosmetic":
+        out.append(
+            "ℹ whitespace-only change: the words are identical (line endings, trailing"
+            " spaces or end-of-file blank lines)"
+        )
     out.append("")
 
     out.append("=== template ===")

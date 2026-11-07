@@ -189,6 +189,8 @@ def log_serve(
     tokens_out: int | None = None,
     error: str = "",
     sample_rate: float = 1.0,
+    digest: str = "",
+    rendered_sha256: str = "",
 ) -> bool:
     """Record that ``sha`` of ``prompt`` served a request.
 
@@ -206,10 +208,11 @@ def log_serve(
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(statedb.SCHEMA)
+        statedb.migrate(conn)
         conn.execute(
             "INSERT INTO serving (ts, env, prompt, sha, model, request_id,"
-            " latency_ms, tokens_in, tokens_out, error)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " latency_ms, tokens_in, tokens_out, error, digest, rendered_sha256)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 statedb.utcnow(),
                 env,
@@ -221,6 +224,8 @@ def log_serve(
                 tokens_in,
                 tokens_out,
                 error,
+                digest,
+                rendered_sha256,
             ),
         )
         conn.commit()

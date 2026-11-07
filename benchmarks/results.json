@@ -1,0 +1,39 @@
+{
+  "hash": {
+    "canonical digest (0.3.0 review)": {
+      "false_drift": 0.0,
+      "missed": 0.0
+    },
+    "config digest (0.2.0 pin)": {
+      "false_drift": 0.3333333333333333,
+      "missed": 0.0
+    },
+    "file bytes": {
+      "false_drift": 1.0,
+      "missed": 0.0
+    },
+    "template hash (0.2.0 pin)": {
+      "false_drift": 0.3333333333333333,
+      "missed": 0.2222222222222222
+    }
+  },
+  "runtime": {
+    "1": {
+      "check_ms": 1.9626449993666029,
+      "get_render_us": 8.797374550067616
+    },
+    "10": {
+      "check_ms": 9.113070998864714,
+      "get_render_us": 6.349162599963165
+    },
+    "100": {
+      "check_ms": 115.80380700070236,
+      "get_render_us": 6.571784949937864
+    }
+  },
+  "tamper": {
+    "attacks": 20,
+    "caught_0_2_0": 16,
+    "caught_now": 20
+  }
+}

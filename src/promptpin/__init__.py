@@ -6,7 +6,7 @@ pins recorded in a committed ``promptpin.lock`` file. Local-first: no server,
 no vendor database, nothing on the request hot path.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 from promptpin.client import (
     load_bundle,
@@ -16,8 +16,12 @@ from promptpin.client import (
     render_template,
     resolve,
 )
+from promptpin.runtime import PinnedPrompts, PromptIntegrityError, Receipt
 
 __all__ = [
+    "PinnedPrompts",
+    "PromptIntegrityError",
+    "Receipt",
     "__version__",
     "load_bundle",
     "log_serve",
