@@ -45,12 +45,12 @@ Cosmetic edits: CRLF file, reordered YAML keys, added comment, trailing spaces, 
 
 | Prompts in bundle | get()+render() per request | full re-verify (`check()`) |
 |---|---|---|
-| 1 | 23.7 us | 1.27 ms |
-| 10 | 21.9 us | 15.51 ms |
-| 100 | 27.4 us | 196.53 ms |
+| 1 | 23.2 us | 0.72 ms |
+| 10 | 24.4 us | 13.63 ms |
+| 100 | 19.8 us | 149.78 ms |
 
 | Serving-log append (`log_serve`) | 8 threads x 100 appends, failures | hidden-character scan of a 5 MB prompt |
 |---|---|---|
-| 0.16 ms | 0 of 800 | 0.09 s |
+| 0.09 ms | 0 of 800 | 0.04 s |
 
-Load average when this ran: 12.1/11.4/11.1 (1/5/15 min; timings are noisy when high). Median wall time on the machine that ran the benchmark (single thread, Python); re-run to compare on yours. `check()` runs every `reverify_interval` seconds (default 30), not per request.
+Load average when this ran: 9.5/10.9/10.8 (1/5/15 min; timings are noisy when high). Median wall time on the machine that ran the benchmark (single thread, Python); re-run to compare on yours. `check()` runs every `reverify_interval` seconds (default 30), not per request.

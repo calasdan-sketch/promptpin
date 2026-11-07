@@ -10,12 +10,17 @@ path. One runtime dependency (PyYAML).
 
 ```bash
 pip install promptpin
-promptpin init
-# edit prompts/greeter.yaml, commit it
+git init && promptpin init             # any existing git repo works too; git needs user.name/user.email set
+# edit prompts/greeter.yaml, then: git add -A && git commit -m "add greeter"
 promptpin release greeter              # tags promptpin/greeter@v1
 promptpin deploy greeter@v1 --env production
 promptpin verify                       # CI gate: every pin re-derived from git
 ```
+
+> **Install note.** PyPI had only `0.1.1` when this was written (checked 2026-11-07); everything marked
+> "0.2" or "0.3" below needs a newer release. Until then:
+> `pip install "git+https://github.com/calasdan-sketch/promptpin"`. Python 3.9+ and one dependency (PyYAML);
+> `promptpin --version` shows what you have. Tested on Linux only (see Limitations).
 
 ## What a reviewer can't see, promptpin can
 
@@ -88,7 +93,7 @@ promptpin review --base origin/main                      # plain-language Markdo
   `on_error="ignore"` to prefer availability over a complete log.
 - **Hostile values.** `served.render(..., scan_values="error")` refuses variable values that contain
   bidi/zero-width/tag characters or terminal escapes (default `"off"`: values are substituted as given).
-- **JavaScript.** `js/promptpin-verify.mjs` (Node 18+, zero dependencies) verifies the same bundle
+- **JavaScript.** `promptpin js-verifier --out ./promptpin-verify.mjs` copies out the verifier (it ships inside the Python package; Node 18+, zero dependencies, a module to `import`, not a command) verifies the same bundle
   (`manifest.json` is exported next to `manifest.yaml`) and renders text and chat prompts with the same
   `promptpin.*` attributes. A parity test checks digests and rendering against Python.
 - **Review for non-engineers.** `promptpin review` says "Wording changed: 2 lines added", "Settings
@@ -124,7 +129,7 @@ sunset its platform on 8 September 2025 and removed customer data afterwards
 goes, your version history goes with it.
 
 Measured, not claimed ([benchmarks/RESULTS.md](benchmarks/RESULTS.md), re-run with
-`python benchmarks/run.py`): 20 tamper scenarios (lock edits, bundle edits, bidi/zero-width/tag
+`python benchmarks/run.py`): 21 tamper scenarios (lock edits, bundle edits, bidi/zero-width/tag
 characters, unmerged-branch pins, drifted serving logs, forged attestations) — the 0.2.0 defences caught
 16 of 21, 0.3 catches 21 (the new row is a Cyrillic look-alike letter, caught as a `validate --strict` warning). For whitespace noise, an exact template hash reports 33% of cosmetic edits as
 changes; the canonical form used by `diff`/`review` reports 0% and missed 0 of 27 real edits (pins stay
@@ -156,7 +161,7 @@ Checked November 2026.
 | Content hash of the served prompt exposed | `sha` + config `digest` + rendered hash per request | not in `Prompt_Text` fields (langfuse 5.2.0, checked) | not in `PromptVersion` attributes (mlflow-skinny 3.18.0, checked) | no hash field in the SDK's prompt-template types (promptlayer 1.5.17, checked; server side unverified) | — | git SHA |
 | Trace shows which prompt served | `promptpin.*` span attributes (you call `annotate_span`) | name + version ([docs](https://langfuse.com/docs/prompt-management/features/link-to-traces)); no hash mentioned | unverified | unverified | — | — |
 | Offline check that served requests were the pinned ones | `log verify` | — | — | — | — | — |
-| License | MIT | unverified | unverified | commercial service | MIT | FSL-1.1-MIT |
+| License | MIT | MIT (Python SDK, per PyPI); server unverified | Apache-2.0 (per PyPI) | commercial service; Python SDK Apache-2.0 (per PyPI) | MIT | FSL-1.1-MIT |
 
 ## Concepts
 
@@ -233,7 +238,7 @@ promptpin log stats --prompt classifier --env production --since 24h
 promptpin list                        # prompts + latest released version
 promptpin versions classifier          # all released versions
 promptpin show classifier@v2 --var ticket_text="login broken"
-promptpin status                      # what's pinned where
+promptpin status                      # what's pinned where (--json for scripts; so does `list`)
 promptpin history --env production    # deploy ledger
 promptpin validate                    # schema, variables, hidden chars, look-alike letters, secrets (exit 1 on error)
 promptpin validate --strict --json    # warnings fail too; machine-readable
@@ -390,11 +395,20 @@ evals, serving log) and the deploy mutex.
 - Templating is plain `{{var}}` substitution — no loops or conditionals.
 - If a branch and a tag share a name, git's own ref-ambiguity rules apply.
 
+- **Windows and Python 3.9 were never run.** All testing was on Linux (Python 3.11-3.13). A static review
+  covers path separators, atomic file replacement (retried when a file is in use), line endings (files are written as
+  bytes), the deploy lock (`msvcrt`) and a console that cannot show `→` (escaped, no crash). Treat Windows as
+  unverified until your CI says otherwise. Python 3.9 is checked by syntax only.
+- **Exit codes.** `0` ok, `1` a problem promptpin reports in plain words (also any OS error such as a
+  read-only folder), `2` wrong command line, `70` a bug in promptpin (set `PROMPTPIN_DEBUG=1` for the trace),
+  `130` Ctrl-C, `141` output pipe closed.
+
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-pytest            # 313 tests + 1 skipped (about 4 minutes; most of it is creating throwaway git repos)
+pytest            # 332 tests + 1 skipped (2-4 minutes; most of it is creating throwaway git repos)
+mypy
 ruff check src tests
 ruff format --check src tests
 ```

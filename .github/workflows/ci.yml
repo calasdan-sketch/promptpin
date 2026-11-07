@@ -1,0 +1,26 @@
+# Never run yet (written in a sandbox with no GitHub access). The point of the Windows and macOS
+# rows is to find out, on the first push, what the Linux-only testing could not.
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.9", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0, persist-credentials: false }
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ matrix.python }}" }
+      - run: git config --global user.name ci && git config --global user.email ci@example.com
+      - run: python -m pip install -e ".[dev]"
+      - run: ruff check src tests
+      - run: mypy
+      - run: python -m pytest -q

@@ -25,7 +25,7 @@ def test_full_workflow(prompt_repo, capsys):
         ["deploy", "classifier@v1", "--env", "staging", "--note", "first"], prompt_repo, capsys
     )
     assert rc == 0
-    assert "pinned classifier@promptpin/classifier@v1" in out
+    assert "pinned classifier@v1 " in out
     assert "first deploy" in out or "previous: (none" in out
 
     rc, out = _run(["status", "--env", "staging"], prompt_repo, capsys)

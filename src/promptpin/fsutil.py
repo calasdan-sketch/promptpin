@@ -4,7 +4,27 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
+
+_IS_WINDOWS = os.name == "nt"
+
+
+def _replace_with_retry(tmp: str, path: Path, attempts: int = 10) -> None:
+    """``os.replace`` that waits briefly when Windows says the target is in use.
+
+    On Windows, replacing a file that another process (an antivirus scan, an editor, a
+    reader) has open raises ``PermissionError``; it clears within milliseconds. On POSIX
+    this never retries. Not exercised on Windows (see docs/ROUND4.md).
+    """
+    for attempt in range(attempts):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if not _IS_WINDOWS or attempt == attempts - 1:
+                raise
+            time.sleep(0.02 * (attempt + 1))
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -26,7 +46,7 @@ def atomic_write_bytes(path: Path, data: bytes) -> None:
         except OSError:
             mode = 0o644
         os.chmod(tmp, mode)
-        os.replace(tmp, path)
+        _replace_with_retry(tmp, path)
     except BaseException:
         try:
             os.unlink(tmp)

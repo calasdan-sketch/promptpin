@@ -137,15 +137,19 @@ def resolve_prompt_ref(repo: Path, prompt: str, ref: str) -> tuple[str, str, boo
         # definition, even though the underlying tag is immutable.
         sha, _ = resolve_ref(repo, tag)
         return sha, f"latest→{tag}", True
-    immutable_tag = False
     if is_version_label(ref):
-        ref = tag_name(prompt, ref)
-        display = ref
-        immutable_tag = True
+        tagged = tag_name(prompt, ref)
+        try:
+            sha, _ = resolve_ref(repo, tagged)
+        except VersionNotFoundError:
+            # A short SHA made only of digits (about 1 commit in 27 has one at 7 characters)
+            # looks like a version number. If no such release tag exists, treat it as a SHA.
+            if not (ref.isdigit() and len(ref) >= 7):
+                raise
+        else:
+            return sha, tagged, False
 
     sha, mutable = resolve_ref(repo, ref)
-    if immutable_tag:
-        mutable = False
     return sha, display, mutable
 
 
@@ -181,7 +185,14 @@ def create_tag(repo: Path, prompt: str, version: str, sha: str, message: str) ->
     tag = tag_name(prompt, version)
     proc = _run(repo, "tag", "-a", tag, sha, "-m", message)
     if proc.returncode != 0:
-        raise VersionNotFoundError(f"could not create tag {tag}: {proc.stderr.strip()}")
+        err = proc.stderr.strip()
+        hint = ""
+        if any(m in err for m in ("identity unknown", "unable to auto-detect", "empty ident")):
+            hint = (
+                'git does not know who you are. Run: git config user.name "Your Name" && '
+                "git config user.email you@example.com\n"
+            )
+        raise VersionNotFoundError(f"could not create tag {tag}: {hint}{err}")
     return tag
 
 

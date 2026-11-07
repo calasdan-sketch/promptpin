@@ -11,7 +11,7 @@ import pytest
 from promptpin import PinnedPrompts, deploys
 from tests.conftest import release
 
-JS = Path(__file__).resolve().parents[1] / "js" / "promptpin-verify.mjs"
+JS = Path(__file__).resolve().parents[1] / "src" / "promptpin" / "promptpin-verify.mjs"
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="needs node")
 
 PROMPTS = {

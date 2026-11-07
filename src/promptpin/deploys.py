@@ -171,7 +171,7 @@ def _acquire(fh, deadline: float, timeout: float) -> None:
 
         while True:
             try:
-                _msvcrt.locking(fh.fileno(), _msvcrt.LK_NBLCK, 1)
+                _msvcrt.locking(fh.fileno(), _msvcrt.LK_NBLCK, 1)  # type: ignore[attr-defined]
                 return
             except OSError:
                 if time.time() >= deadline:
@@ -194,7 +194,7 @@ def _release(fh) -> None:
     except ImportError:
         import msvcrt as _msvcrt
 
-        _msvcrt.locking(fh.fileno(), _msvcrt.LK_UNLCK, 1)
+        _msvcrt.locking(fh.fileno(), _msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
     else:
         _fcntl.flock(fh, _fcntl.LOCK_UN)
 
@@ -314,7 +314,7 @@ def export_bundle(repo_root: Path, env: str, out_dir: Path) -> dict:
         "prompts": manifest_prompts,
     }
     fsutil.atomic_write_text(out_dir / "manifest.yaml", yamlsafe.dump(manifest))
-    # JSON twin for runtimes without a YAML parser (see js/promptpin-verify.mjs).
+    # JSON twin for runtimes without a YAML parser (see promptpin/promptpin-verify.mjs).
     # `digest_input` is the exact string `digest` hashes, so no verifier has to
     # re-serialise params identically to Python.
     json_manifest = {

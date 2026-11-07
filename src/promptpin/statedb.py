@@ -113,7 +113,7 @@ def record_deploy(
         ),
     )
     conn.commit()
-    return cur.lastrowid
+    return int(cur.lastrowid or 0)
 
 
 def deploy_history(
@@ -167,7 +167,7 @@ def record_eval(
         (utcnow(), prompt, ref, resolved_sha, suite, dataset_sha, metric, value, recorded_by, note),
     )
     conn.commit()
-    return cur.lastrowid
+    return int(cur.lastrowid or 0)
 
 
 def evals_for_sha(conn: sqlite3.Connection, prompt: str, sha: str) -> list[sqlite3.Row]:
@@ -260,7 +260,7 @@ def record_serve(
         ),
     )
     conn.commit()
-    return cur.lastrowid
+    return int(cur.lastrowid or 0)
 
 
 def serving_stats(

@@ -7,7 +7,7 @@ import datetime
 import sys
 from pathlib import Path
 
-from promptpin import deploys, fsutil, gitutil, registry, safety, statedb, yamlsafe
+from promptpin import __version__, deploys, fsutil, gitutil, registry, safety, statedb, yamlsafe
 from promptpin import diff as diffmod
 from promptpin import validate as validatemod
 from promptpin.config import (
@@ -48,6 +48,19 @@ def _say(text: object = "") -> None:
 _one = safety.one_line
 
 
+def _label(name: str, display_ref: str) -> str:
+    """``greeter@v1`` instead of ``greeter@promptpin/greeter@v1`` for release tags."""
+    prefix = f"{gitutil.TAG_PREFIX}/{name}@"
+    short = display_ref[len(prefix) :] if display_ref.startswith(prefix) else display_ref
+    return f"{name}@{short}"
+
+
+def _print_json(payload: object) -> None:
+    import json
+
+    print(json.dumps(payload, indent=2, ensure_ascii=True))
+
+
 def _repo(args) -> Path:
     return gitutil.ensure_repo(Path(args.repo or Path.cwd()))
 
@@ -70,13 +83,14 @@ def cmd_init(args) -> int:
     cfg_path = top / CONFIG_FILENAME
     if not cfg_path.exists():
         cfg = Config()
-        cfg_path.write_text(cfg.dump(), encoding="utf-8")
+        fsutil.atomic_write_text(cfg_path, cfg.dump())
         _say(f"wrote {CONFIG_FILENAME}")
     prompts_dir = top / Config.load(top).prompts_dir
     prompts_dir.mkdir(parents=True, exist_ok=True)
     example = prompts_dir / "greeter.yaml"
     if not any(prompts_dir.iterdir()):
-        example.write_text(
+        fsutil.atomic_write_text(
+            example,
             "name: greeter\n"
             "description: Example prompt — edit me, commit, then release + deploy.\n"
             "model: gpt-4o-mini\n"
@@ -86,18 +100,18 @@ def cmd_init(args) -> int:
             "  - user_name\n"
             "template: |\n"
             "  Greet {{user_name}} warmly in one short sentence.\n",
-            encoding="utf-8",
         )
         _say(f"wrote example {example.relative_to(top)}")
     gitignore = top / ".gitignore"
     entry = f"{STATE_DIRNAME}/\n"
     if gitignore.exists():
         if entry not in gitignore.read_text(encoding="utf-8"):
-            with open(gitignore, "a", encoding="utf-8") as fh:
-                fh.write(entry)
+            old = gitignore.read_bytes()
+            sep = b"" if old.endswith(b"\n") or not old else b"\n"
+            fsutil.atomic_write_bytes(gitignore, old + sep + entry.encode("utf-8"))
             _say(f"added {STATE_DIRNAME}/ to .gitignore")
     else:
-        gitignore.write_text(entry, encoding="utf-8")
+        fsutil.atomic_write_text(gitignore, entry)
         _say("wrote .gitignore")
     _say("\nnext steps:")
     _say("  1. edit prompts/greeter.yaml, then: git add -A && git commit -m 'add greeter'")
@@ -113,16 +127,25 @@ def cmd_list(args) -> int:
     top = _repo(args)
     cfg = Config.load(top)
     names = registry.list_prompts(top, cfg.prompts_dir)
-    if not names:
+    rows: list[dict] = []
+    if not names and not args.json:
         _say(f"no prompts in {cfg.prompts_dir}/ yet — run `promptpin init`")
         return 0
     for name in names:
         try:
             prompt = registry.load_prompt(top, cfg.prompts_dir, name)
             latest = gitutil.latest_tag(top, name)
-            _say(f"{name:24} {prompt.model or '(no model)':20} latest={latest or '(unreleased)'}")
+            rows.append({"name": name, "model": prompt.model, "latest": latest})
+            if not args.json:
+                _say(
+                    f"{name:24} {prompt.model or '(no model)':20} latest={latest or '(unreleased)'}"
+                )
         except PromptpinError as exc:
-            _say(f"{name:24} ERROR: {exc}")
+            rows.append({"name": name, "error": safety.one_line(exc)})
+            if not args.json:
+                _say(f"{name:24} ERROR: {exc}")
+    if args.json:
+        _print_json({"prompts": rows})
     return 0
 
 
@@ -291,16 +314,16 @@ def cmd_release(args) -> int:
         )
     sha = gitutil.head_sha(top) if not args.sha else gitutil.resolve_ref(top, args.sha)[0]
     # The prompt file must exist at the tagged commit.
-    rel = None
+    found: str | None = None
     for ext in (".yaml", ".yml", ".md"):
         candidate = f"{cfg.prompts_dir}/{args.name}{ext}"
         try:
             gitutil.show_file(top, sha, candidate)
-            rel = candidate
+            found = candidate
             break
         except PromptpinError:
             continue
-    if rel is None:
+    if found is None:
         raise PromptpinError(
             f"prompt {args.name!r} has no file in {cfg.prompts_dir}/ at {sha[:7]} — "
             "commit the prompt file first"
@@ -335,7 +358,7 @@ def cmd_deploy(args) -> int:
         note=args.note or "",
         commit=(not args.no_commit),
     )
-    _say(f"pinned {name}@{result['display_ref']} → {sha7(result['sha'])} on {args.env}")
+    _say(f"pinned {_label(name, result['display_ref'])} → {sha7(result['sha'])} on {args.env}")
     if result["previous_sha"]:
         _say(f"  previous: {sha7(result['previous_sha'])}")
     else:
@@ -375,6 +398,28 @@ def cmd_rollback(args) -> int:
 def cmd_status(args) -> int:
     top = _repo(args)
     pins = deploys.read_lock(top)
+    if args.json:
+        envs_json = [args.env] if args.env else sorted(pins)
+        _print_json(
+            {
+                "envs": {
+                    env: {
+                        name: {
+                            "ref": pin.ref,
+                            "sha": pin.sha,
+                            "model": pin.model,
+                            "mutable_ref": bool(pin.mutable_ref),
+                            "deployed_by": pin.deployed_by,
+                            "deployed_at": pin.deployed_at,
+                        }
+                        for name, pin in sorted(pins.get(env, {}).items())
+                    }
+                    for env in envs_json
+                },
+                "issues": [safety.one_line(i) for i in deploys.status_issues(top, pins)],
+            }
+        )
+        return 0
     if not pins:
         _say(f"nothing deployed yet — {LOCK_FILENAME} is empty or missing")
         return 0
@@ -494,7 +539,7 @@ def cmd_attest(args) -> int:
     top = _repo(args)
     statement = attest.build_statement(top, args.env)
     envelope = attest.sign(statement, _read_key(args.key_env))
-    Path(args.out).write_text(json.dumps(envelope, indent=2) + "\n", encoding="utf-8")
+    fsutil.atomic_write_text(Path(args.out), json.dumps(envelope, indent=2) + "\n")
     _say(f"attested {len(statement['subject'])} prompt(s) for {args.env} → {args.out}")
     _say(f"bundle_digest: {statement['predicate']['bundle_digest']}")
     _say("HMAC-signed with a shared secret: anyone holding the key can also forge it")
@@ -622,9 +667,12 @@ def cmd_eval(args) -> int:
                 raise PromptpinError(f"bad --metric {item!r}: expected name=value")
             k, v = item.split("=", 1)
             try:
-                metrics[k] = float(v)
+                number = float(v)
             except ValueError as exc:
                 raise PromptpinError(f"bad --metric {item!r}: value must be numeric") from exc
+            if number != number or number in (float("inf"), float("-inf")):
+                raise PromptpinError(f"bad --metric {item!r}: NaN and infinity are not scores")
+            metrics[k] = number
         if not metrics:
             raise PromptpinError("at least one --metric name=value is required")
         if not args.suite:
@@ -650,7 +698,7 @@ def cmd_eval(args) -> int:
         finally:
             conn.close()
         _say(
-            f"recorded {len(metrics)} metric(s) for {args.prompt}@{display}"
+            f"recorded {len(metrics)} metric(s) for {_label(args.prompt, display)}"
             f" ({sha[:7]}) from suite {args.suite!r}"
         )
         return 0
@@ -726,12 +774,14 @@ def build_parser() -> argparse.ArgumentParser:
         "pin versions to envs, log what served, diff with evals attached.",
     )
     p.add_argument("--repo", help="repo path (default: cwd)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p.add_argument("--version", action="version", version=f"promptpin {__version__}")
+    sub = p.add_subparsers(dest="cmd")
 
     s = sub.add_parser("init", help="scaffold promptpin.yaml, prompts/, .gitignore")
     s.set_defaults(func=cmd_init)
 
     s = sub.add_parser("list", help="list prompts with latest released version")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
     s.set_defaults(func=cmd_list)
 
     s = sub.add_parser("versions", help="list released versions of a prompt")
@@ -805,6 +855,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("status", help="show what's pinned where")
     s.add_argument("--env")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("history", help="deploy ledger")
@@ -879,6 +930,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--key-env", default="PROMPTPIN_ATTEST_KEY")
     s.set_defaults(func=cmd_attest_verify)
 
+    s = sub.add_parser(
+        "js-verifier",
+        help="print the path of (or copy out) the zero-dependency Node.js bundle verifier",
+    )
+    s.add_argument("--out", help="copy the verifier to this file instead of printing its path")
+    s.set_defaults(func=cmd_js_verifier)
+
     s = sub.add_parser("eval", help="eval scores")
     eval_sub = s.add_subparsers(dest="eval_cmd", required=True)
     er = eval_sub.add_parser("record", help="attach eval scores to a version")
@@ -904,9 +962,53 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _safe_streams() -> None:
+    """Never crash on a console that cannot show a character (Windows cp1252, LC_ALL=C).
+
+    Unencodable characters print as ``\\uXXXX`` escapes instead of raising
+    ``UnicodeEncodeError``. Streams that cannot be reconfigured (already replaced) are left alone.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="backslashreplace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
+def cmd_js_verifier(args) -> int:
+    from importlib import resources
+
+    src = resources.files("promptpin").joinpath("promptpin-verify.mjs")
+    if not src.is_file():
+        raise PromptpinError("the Node.js verifier is missing from this installation")
+    if not args.out:
+        with resources.as_file(src) as real:
+            print(real)
+        return 0
+    out = Path(args.out)
+    fsutil.atomic_write_bytes(out, src.read_bytes())
+    _say(f"wrote {out} - it is a library, not a command. In Node 18+:")
+    shown = str(out) if out.is_absolute() or str(out).startswith(".") else f"./{out}"
+    _say(f"  import {{ loadBundle }} from {shown!r};")
+    return 0
+
+
+def _os_error_message(exc: OSError) -> str:
+    where = f" ({exc.filename})" if getattr(exc, "filename", None) else ""
+    reason = exc.strerror or exc.__class__.__name__
+    hint = ""
+    if isinstance(exc, PermissionError) or getattr(exc, "errno", None) in (13, 30):
+        hint = " — check that you may write here (read-only folder or file in use?)"
+    return f"{reason}{where}{hint}"
+
+
 def main(argv: list[str] | None = None) -> int:
+    _safe_streams()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help()
+        return 2
     try:
         return args.func(args)
     except PromptpinError as exc:
@@ -924,6 +1026,22 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, ValueError):
             pass
         return 141
+    except OSError as exc:
+        # Disk full, permission denied, file in use: a sentence, not a traceback.
+        print(f"promptpin: error: {safety.sanitize(_os_error_message(exc))}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - last-resort guard; set PROMPTPIN_DEBUG=1 for details
+        import os
+
+        if os.environ.get("PROMPTPIN_DEBUG"):
+            raise
+        print(
+            f"promptpin: internal error ({exc.__class__.__name__}): {safety.sanitize(exc)}\n"
+            "This is a bug in promptpin, not in your prompts. Re-run with PROMPTPIN_DEBUG=1 to "
+            "see the full trace, and report it at https://github.com/calasdan-sketch/promptpin/issues",
+            file=sys.stderr,
+        )
+        return 70
 
 
 if __name__ == "__main__":

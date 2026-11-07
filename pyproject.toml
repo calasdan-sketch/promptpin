@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,19 +8,40 @@ version = "0.3.0"
 description = "Git-native prompt registry: version prompts with git, pin versions to envs, log what served, diff with evals attached."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
-authors = [{ name = "Calas Automations" }]
-keywords = ["prompts", "llm", "versioning", "git", "mlops"]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Calas Automations Inc." }]
+keywords = ["prompts", "llm", "versioning", "git", "mlops", "prompt-management", "supply-chain"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Version Control :: Git",
+    "Typing :: Typed",
+]
 dependencies = ["pyyaml>=6"]
+
+[project.urls]
+Homepage = "https://github.com/calasdan-sketch/promptpin"
+Source = "https://github.com/calasdan-sketch/promptpin"
+Issues = "https://github.com/calasdan-sketch/promptpin/issues"
+Changelog = "https://github.com/calasdan-sketch/promptpin/blob/HEAD/CHANGELOG.md"
 
 [project.scripts]
 promptpin = "promptpin.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.1"]
+dev = ["pytest>=7", "ruff>=0.1", "mypy>=1.8", "types-PyYAML"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+promptpin = ["py.typed", "promptpin-verify.mjs"]
 
 [tool.ruff]
 target-version = "py39"
@@ -34,3 +55,7 @@ testpaths = ["tests"]
 # Tests import shared helpers as `tests.conftest`; make plain `pytest` work
 # from a fresh clone (not only `python -m pytest`).
 pythonpath = ["."]
+
+[tool.mypy]
+files = ["src/promptpin"]
+warn_unused_ignores = false

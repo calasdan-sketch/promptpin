@@ -156,6 +156,7 @@ class ServedPrompt:
                         f"variable {key!r} contains {len(hits)} invisible or control"
                         f" character(s), first {hits[0].label}; refusing to render"
                     )
+        out: str | list[dict]
         if self.entry["format"] == "chat":
             out = render_messages(self.template, variables, **kwargs)
             canonical = json.dumps(out, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
