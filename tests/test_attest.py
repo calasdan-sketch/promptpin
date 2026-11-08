@@ -8,7 +8,7 @@ import pytest
 from promptpin import PinnedPrompts, PromptIntegrityError, attest, cli, deploys
 from tests.conftest import CLASSIFIER_V2, commit_prompt, release
 
-KEY = b"k" * 32
+KEY = bytes(range(33, 65))  # printable, varied: attest refuses repetitive keys
 
 
 @pytest.fixture()
@@ -35,7 +35,7 @@ def test_sign_open_roundtrip_and_wrong_key(pinned):
     env = attest.sign(attest.build_statement(repo, "production"), KEY)
     assert attest.open_envelope(env, KEY)["predicate"]["env"] == "production"
     with pytest.raises(attest.AttestationError, match="does not match"):
-        attest.open_envelope(env, b"z" * 32)
+        attest.open_envelope(env, bytes(range(97, 129)))
 
 
 def test_payload_tamper_and_malformed(pinned):
@@ -75,7 +75,7 @@ def test_runtime_uses_attested_digest(pinned, tmp_path):
     with pytest.raises(PromptIntegrityError):
         PinnedPrompts(bundle, attestation=path, attestation_key=KEY)
     with pytest.raises(PromptIntegrityError):
-        PinnedPrompts(bundle, attestation=path, attestation_key=b"y" * 32)
+        PinnedPrompts(bundle, attestation=path, attestation_key=bytes(range(65, 97)))
     with pytest.raises(ValueError):
         PinnedPrompts(bundle, attestation=path)
 

@@ -428,12 +428,13 @@ def deploy(
             )
         finally:
             conn.close()
-
-    commit_sha = None
-    if do_commit:
-        commit_sha = gitutil.commit_file(
-            top, LOCK_FILENAME, f"promptpin: deploy {name}@{ref} → {env}"
-        )
+        # Commit while still holding the mutex: two deploys from separate processes would
+        # otherwise race on git's own index.lock and one would fail after changing the lock.
+        commit_sha = None
+        if do_commit:
+            commit_sha = gitutil.commit_file(
+                top, LOCK_FILENAME, f"promptpin: deploy {name}@{ref} → {env}"
+            )
 
     return {
         "prompt": name,
@@ -458,27 +459,87 @@ def rollback(
 ) -> dict:
     """Redeploy the previous pin for (env, name)."""
     top = gitutil.ensure_repo(repo_root)
-    conn = statedb.connect(top)
-    try:
-        prev = statedb.previous_pin(conn, env, name)
-    finally:
-        conn.close()
+    # The committed lock's git history is the same on every machine; the local
+    # ledger is only a fallback (it is empty on a fresh clone or a CI runner).
+    from promptpin import history
+
+    prev: dict | None = None
+    found = history.previous_pin_sha(top, env, name)
+    if found is not None:
+        prev = {"resolved_sha": found[0], "ref": found[1] or found[0][:7]}
+    else:
+        conn = statedb.connect(top)
+        try:
+            row = statedb.previous_pin(conn, env, name)
+        finally:
+            conn.close()
+        if row is not None:
+            prev = {"resolved_sha": row["resolved_sha"], "ref": row["ref"]}
     if prev is None:
         raise DeployError(
-            f"no previous deployment of {name!r} to {env!r} in the local ledger — "
-            "nothing to roll back to. (The ledger lives in .promptpin/state.db;"
-            " deploys made on another machine are not visible here.)"
+            f"no earlier pin of {name!r} on {env!r} found in the git history of {LOCK_FILENAME}"
+            " or in the local ledger — nothing to roll back to."
         )
     result = deploy(
         top,
         name,
         prev["resolved_sha"],
         env,
-        note=note or f"rollback from {prev['ref']}",
+        note=note or f"rollback to {prev['ref']}",
         commit=commit,
         actor=actor,
     )
-    result["rolled_back_from"] = prev["resolved_sha"]
+    # the pin that was replaced (None only if the env had no pin, which cannot happen here)
+    result["rolled_back_from"] = result["previous_sha"] or prev["resolved_sha"]
+    return result
+
+
+def promote(
+    repo_root: Path,
+    name: str,
+    from_env: str,
+    to_env: str,
+    note: str = "",
+    commit: bool | None = None,
+    actor: str | None = None,
+) -> dict:
+    """Pin to ``to_env`` exactly what ``from_env`` has pinned (same commit, same config).
+
+    Refuses when the source pin fails verification, when the source env has no
+    pin for ``name``, or when a recorded release tag no longer points at the
+    pinned commit - so "promote" can never ship something other than what was
+    tested in ``from_env``.
+    """
+    top = gitutil.ensure_repo(repo_root)
+    if from_env == to_env:
+        raise DeployError("--from and --to are the same environment")
+    pin = read_lock(top).get(from_env, {}).get(name)
+    if pin is None:
+        raise DeployError(f"{name!r} is not pinned on {from_env!r} - deploy it there first")
+    bad = [
+        c for c in verify_lock(top, env=from_env) if c.level == "error" and c.prompt in (name, "-")
+    ]
+    if bad:
+        raise DeployError(
+            f"refusing to promote: {from_env}/{name} fails verification ({bad[0].message})"
+            " - run `promptpin verify`"
+        )
+    ref = pin.tag or pin.sha
+    sha, _, _ = gitutil.resolve_prompt_ref(top, name, ref)
+    if sha != pin.sha:
+        raise DeployError(
+            f"refusing to promote: {ref} now points at {sha[:7]}, not the pinned {pin.sha[:7]}"
+        )
+    result = deploy(
+        top,
+        name,
+        ref,
+        to_env,
+        note=note or f"promoted from {from_env}",
+        commit=commit,
+        actor=actor,
+    )
+    result["promoted_from"] = from_env
     return result
 
 

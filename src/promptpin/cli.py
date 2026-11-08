@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import sys
+import time
 from pathlib import Path
 
 from promptpin import __version__, deploys, fsutil, gitutil, registry, safety, statedb, yamlsafe
@@ -356,7 +357,7 @@ def cmd_deploy(args) -> int:
         ref,
         args.env,
         note=args.note or "",
-        commit=(not args.no_commit),
+        commit=False if args.no_commit else None,  # None = promptpin.yaml auto_commit_deploys
     )
     _say(f"pinned {_label(name, result['display_ref'])} → {sha7(result['sha'])} on {args.env}")
     if result["previous_sha"]:
@@ -387,6 +388,24 @@ def cmd_rollback(args) -> int:
     result = deploys.rollback(top, args.name, args.env, note=args.note or "")
     _say(f"rolled back {args.name} on {args.env} → {sha7(result['sha'])}")
     _say(f"  (was {sha7(result['rolled_back_from'])})")
+    if result["commit_sha"]:
+        _say(f"  committed {LOCK_FILENAME} as {sha7(result['commit_sha'])}")
+    return 0
+
+
+def cmd_promote(args) -> int:
+    top = _repo(args)
+    result = deploys.promote(
+        top,
+        args.name,
+        args.from_env,
+        args.to_env,
+        note=args.note or "",
+        commit=False if args.no_commit else None,
+    )
+    _say(f"promoted {args.name} {args.from_env} → {args.to_env} at {sha7(result['sha'])}")
+    if result["previous_sha"]:
+        _say(f"  (was {sha7(result['previous_sha'])})")
     if result["commit_sha"]:
         _say(f"  committed {LOCK_FILENAME} as {sha7(result['commit_sha'])}")
     return 0
@@ -448,16 +467,65 @@ def cmd_status(args) -> int:
 # --------------------------------------------------------------- history ---
 
 
-def cmd_history(args) -> int:
-    top = _repo(args)
+def _check_limit(limit: int) -> None:
+    if limit < 1:
+        raise PromptpinError("--limit must be 1 or more")
+
+
+def _ledger_rows(top: Path, args) -> list[dict]:
     conn = statedb.connect(top)
     try:
         rows = statedb.deploy_history(conn, env=args.env, prompt=args.prompt, limit=args.limit)
     finally:
         conn.close()
-    if not rows:
-        _say("no deploys recorded in the local ledger")
+    return [dict(r) for r in rows]
+
+
+def cmd_history(args) -> int:
+    from promptpin import history
+
+    top = _repo(args)
+    _check_limit(args.limit)
+    source = args.source
+    events: list = []
+    problems: list = []
+    if source in ("auto", "git"):
+        events, problems = history.lock_history(
+            top, env=args.env, prompt=args.prompt, limit=args.limit
+        )
+        if events:
+            source = "git"
+        elif source == "auto":
+            source = "ledger"
+    if args.json:
+        payload: dict = {"source": source}
+        if source == "git":
+            payload["events"] = [ev.to_mapping() for ev in events]
+            payload["problems"] = problems
+        else:
+            payload["events"] = _ledger_rows(top, args)
+        _print_json(payload)
         return 0
+    if source == "git":
+        _say("(from git history of promptpin.lock; same on every machine)")
+        for ev in events:
+            flag = "  ⚠ author differs from deployed_by" if ev.claim_mismatch else ""
+            sig = "" if ev.signature == "N" else f" sig={ev.signature}"
+            _say(
+                f"{_one(ev.commit_date)[:16]}  {ev.action:8} {_one(ev.env):12} {ev.prompt:20}"
+                f" {_one(ev.ref):24} → {ev.sha[:7]}"
+                + (f" (was {ev.previous_sha[:7]})" if ev.previous_sha else "")
+                + f" commit {ev.commit[:7]} by {_one(ev.commit_author)}{sig}{flag}"
+                + (f" — {_one(ev.note)}" if ev.note else "")
+            )
+        for problem in problems:
+            _say(f"⚠ {_one(problem)}")
+        return 0
+    rows = _ledger_rows(top, args)
+    if not rows:
+        _say("no deploys recorded in git history or in the local ledger")
+        return 0
+    _say("(from the local ledger .promptpin/state.db; other machines' deploys are not here)")
     for r in rows:
         ts = datetime.datetime.fromtimestamp(r["ts"], datetime.timezone.utc).strftime(
             "%Y-%m-%d %H:%M UTC"
@@ -513,6 +581,60 @@ def cmd_export(args) -> int:
 # ------------------------------------------------- review / attest ---
 
 
+def cmd_evidence(args) -> int:
+    import json
+
+    from promptpin import evidence
+
+    top = _repo(args)
+    _check_limit(args.limit)
+    key = _read_key(args.key_env) if args.sign else None
+    report = evidence.build(
+        top,
+        args.env,
+        reachable_from=args.reachable_from,
+        require_signed=args.require_signed,
+        db_file=Path(args.db) if args.db else None,
+        limit=args.limit,
+        key=key,
+    )
+    if args.format == "md":
+        text = safety.sanitize(evidence.to_markdown(report))
+    else:
+        text = json.dumps(report, indent=2, ensure_ascii=True) + "\n"
+    if args.out:
+        fsutil.atomic_write_bytes(Path(args.out), text.encode("utf-8"))
+        _say(f"wrote evidence for {args.env} → {args.out}")
+        _say(f"report_sha256: {report['report_sha256']}")
+        _say("keep this hash where the report's editor cannot reach it (a ticket, a signed commit)")
+    else:
+        sys.stdout.write(text)
+    return 0 if report["verify"]["ok"] else 1
+
+
+def cmd_evidence_verify(args) -> int:
+    import json
+
+    from promptpin import evidence
+
+    try:
+        report = json.loads(Path(args.file).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise PromptpinError(f"cannot read evidence report {args.file}: {exc}") from None
+    key = _read_key(args.key_env) if args.sign else None
+    problems = evidence.check(report, key)
+    expected = args.expect_sha256
+    if expected and not problems and report.get("report_sha256") != expected.strip().lower():
+        problems.append("report_sha256 differs from the hash you recorded")
+    for p in problems:
+        _say(f"[error] {_one(p)}")
+    if problems:
+        _say(f"\nevidence FAILED ({len(problems)} problem(s))")
+        return 1
+    _say("evidence OK: contents match report_sha256" + (" and the key" if key else ""))
+    return 0
+
+
 def cmd_review(args) -> int:
     from promptpin import review as reviewmod
 
@@ -552,6 +674,8 @@ def cmd_attest_verify(args) -> int:
     top = _repo(args)
     statement = attest.read_verified(args.file, _read_key(args.key_env))
     problems = attest.check_against_repo(top, statement, args.env)
+    if args.max_age:
+        problems += attest.check_freshness(statement, time.time() - _parse_duration(args.max_age))
     env = statement["predicate"].get("env")
     checks = deploys.verify_lock(
         top, env=env, bundle_dir=Path(args.bundle) if args.bundle else None
@@ -614,6 +738,9 @@ def cmd_log(args) -> int:
             stats = statedb.serving_stats(conn, prompt=args.prompt, env=args.env, since_ts=since)
         finally:
             conn.close()
+        if args.json:
+            _print_json(stats)
+            return 0
         _say(f"serving events: {stats['total']}")
         for v in stats["versions"]:
             lat = f"{v['avg_latency_ms']:.1f}ms" if v["avg_latency_ms"] is not None else "n/a"
@@ -635,10 +762,14 @@ def cmd_log(args) -> int:
         )
         errors = [c for c in checks if c.level == "error"]
         warnings = [c for c in checks if c.level == "warning"]
+        failed = bool(errors or (args.strict and warnings))
+        if args.json:
+            _print_json({"ok": not failed, "checks": [c.to_mapping() for c in checks]})
+            return 1 if failed else 0
         for c in checks:
             where = f"{c.env}/{c.prompt}" if c.prompt != "-" else c.env
             _say(f"[{c.level}] {_one(where)}: {_one(c.message)}")
-        if errors or (args.strict and warnings):
+        if failed:
             _say(f"\nlog verify FAILED ({len(errors)} error(s), {len(warnings)} warning(s))")
             return 1
         _say(f"log verify OK: every logged request in {args.env} used the pinned prompt")
@@ -736,30 +867,58 @@ def cmd_audit(args) -> int:
     top = _repo(args)
     cfg = Config.load(top)
     names = [args.prompt] if args.prompt else registry.list_prompts(top, cfg.prompts_dir)
+    out: dict = {"prompts": {}, "deploys": []}
     for name in names:
         rel = registry.prompt_relpath(top, cfg.prompts_dir, name)
         if rel is None:
             continue
-        _say(f"## {name} ({rel})")
-        for entry in gitutil.file_history(top, rel, limit=10):
+        entries = gitutil.file_history(top, rel, limit=10)
+        out["prompts"][name] = {"path": rel, "commits": entries}
+        if not args.json:
+            _say(f"## {name} ({rel})")
+            for entry in entries:
+                _say(
+                    f"  {entry['date'][:10]} {entry['sha'][:7]} {_one(entry['author']):20}"
+                    f" {_one(entry['message'])}"
+                )
+    from promptpin import history
+
+    events, _ = history.lock_history(top, prompt=args.prompt, limit=10)
+    if events:
+        out["deploys"] = [ev.to_mapping() for ev in events]
+        out["deploys_source"] = "git"
+    else:
+        out["deploys"] = [
+            {
+                "env": r["env"],
+                "prompt": r["prompt"],
+                "ref": r["ref"],
+                "sha": r["resolved_sha"],
+                "actor": r["actor"],
+                "ts": r["ts"],
+            }
+            for r in _ledger_rows(top, argparse.Namespace(env=None, prompt=args.prompt, limit=10))
+        ]
+        out["deploys_source"] = "ledger"
+    if args.json:
+        _print_json(out)
+        return 0
+    if events:
+        _say("\n## recent deploys (git history of promptpin.lock)")
+        for ev in events:
             _say(
-                f"  {entry['date'][:10]} {entry['sha'][:7]} {_one(entry['author']):20}"
-                f" {_one(entry['message'])}"
+                f"  {_one(ev.commit_date)[:10]} {ev.action:8} {_one(ev.env):12} {ev.prompt:20}"
+                f" {_one(ev.ref):20} → {ev.sha[:7]} commit by {_one(ev.commit_author)}"
             )
-    conn = statedb.connect(top)
-    try:
-        rows = statedb.deploy_history(conn, prompt=args.prompt, limit=10)
-    finally:
-        conn.close()
-    if rows:
-        _say("\n## recent deploys")
-        for r in rows:
+    elif out["deploys"]:
+        _say("\n## recent deploys (local ledger)")
+        for r in out["deploys"]:
             ts = datetime.datetime.fromtimestamp(r["ts"], datetime.timezone.utc).strftime(
                 "%Y-%m-%d"
             )
             _say(
-                f"  {ts} {r['env']:12} {r['prompt']:20} {r['ref']:20}"
-                f" → {r['resolved_sha'][:7]} by {_one(r['actor'])}"
+                f"  {ts} {r['env']:12} {r['prompt']:20} {_one(r['ref']):20}"
+                f" → {r['sha'][:7]} by {_one(r['actor'])}"
             )
     return 0
 
@@ -853,6 +1012,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note", default="")
     s.set_defaults(func=cmd_rollback)
 
+    s = sub.add_parser(
+        "promote",
+        help="pin to one env exactly what another env has pinned (e.g. staging to production)",
+    )
+    s.add_argument("name")
+    s.add_argument("--from", dest="from_env", required=True)
+    s.add_argument("--to", dest="to_env", required=True)
+    s.add_argument("--note", default="")
+    s.add_argument("--no-commit", action="store_true", help="don't commit promptpin.lock")
+    s.set_defaults(func=cmd_promote)
+
     s = sub.add_parser("status", help="show what's pinned where")
     s.add_argument("--env")
     s.add_argument("--json", action="store_true", help="machine-readable output")
@@ -862,6 +1032,14 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--env")
     s.add_argument("--prompt")
     s.add_argument("--limit", type=int, default=20)
+    s.add_argument(
+        "--source",
+        choices=["auto", "git", "ledger"],
+        default="auto",
+        help="git = history of promptpin.lock (same everywhere); ledger = this machine's"
+        " .promptpin/state.db; auto = git when it has events",
+    )
+    s.add_argument("--json", action="store_true", help="machine-readable output")
     s.set_defaults(func=cmd_history)
 
     s = sub.add_parser("lock", help="export a minimal runtime manifest for an env")
@@ -893,6 +1071,7 @@ def build_parser() -> argparse.ArgumentParser:
     ls.add_argument("--prompt")
     ls.add_argument("--env")
     ls.add_argument("--since", help="e.g. 24h, 7d, 30m")
+    ls.add_argument("--json", action="store_true", help="machine-readable output")
     ls = log_sub.add_parser(
         "verify", help="fail if any logged request used a prompt other than the pinned one"
     )
@@ -906,6 +1085,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="ignore requests this long after a pin went live (rolling restarts)",
     )
     ls.add_argument("--strict", action="store_true", help="warnings fail too")
+    ls.add_argument("--json", action="store_true", help="machine-readable output")
     ls = log_sub.add_parser("prune", help="delete serving events older than a duration")
     ls.add_argument("--older-than", required=True, help="e.g. 30d")
     s.set_defaults(func=cmd_log)
@@ -917,6 +1097,27 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--head", help="ref with the new lock (default: working tree)")
     s.set_defaults(func=cmd_review)
 
+    s = sub.add_parser(
+        "evidence", help="audit report for an env, re-derived from git (JSON or Markdown)"
+    )
+    s.add_argument("--env", required=True)
+    s.add_argument("--format", choices=["json", "md"], default="json")
+    s.add_argument("--out", help="write here instead of stdout")
+    s.add_argument("--reachable-from", help="reviewed ref pinned commits must be merged into")
+    s.add_argument("--require-signed", action="store_true")
+    s.add_argument("--db", help="serving log to include (default: .promptpin/state.db if present)")
+    s.add_argument("--limit", type=int, default=100, help="most recent deploy events to include")
+    s.add_argument("--sign", action="store_true", help="add an HMAC-SHA256 (shared-secret) MAC")
+    s.add_argument("--key-env", default="PROMPTPIN_ATTEST_KEY", help="env var holding the key")
+    s.set_defaults(func=cmd_evidence)
+
+    s = sub.add_parser("evidence-verify", help="check a stored evidence report was not edited")
+    s.add_argument("file")
+    s.add_argument("--expect-sha256", help="the report_sha256 you recorded when it was made")
+    s.add_argument("--sign", action="store_true", help="also check the HMAC with the key")
+    s.add_argument("--key-env", default="PROMPTPIN_ATTEST_KEY")
+    s.set_defaults(func=cmd_evidence_verify)
+
     s = sub.add_parser("attest", help="write an HMAC-signed in-toto attestation for an env's pins")
     s.add_argument("--env", required=True)
     s.add_argument("--out", required=True)
@@ -927,6 +1128,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("file")
     s.add_argument("--env")
     s.add_argument("--bundle", help="also check this bundle dir matches the attested digest")
+    s.add_argument("--max-age", help="fail if the attestation is older than this, e.g. 24h, 7d")
     s.add_argument("--key-env", default="PROMPTPIN_ATTEST_KEY")
     s.set_defaults(func=cmd_attest_verify)
 
@@ -955,7 +1157,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--ref")
     s.set_defaults(func=cmd_evals)
 
-    s = sub.add_parser("audit", help="who changed what: git history + deploy ledger")
+    s = sub.add_parser("audit", help="who changed what: git history + deploy history")
+    s.add_argument("--json", action="store_true", help="machine-readable output")
     s.add_argument("--prompt")
     s.set_defaults(func=cmd_audit)
 

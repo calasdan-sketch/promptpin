@@ -16,6 +16,7 @@ from pathlib import Path
 
 from promptpin import deploys, gitutil
 from promptpin.deploys import Check
+from promptpin.errors import PromptpinError
 
 
 def _parse_ts(value: str) -> float | None:
@@ -23,6 +24,38 @@ def _parse_ts(value: str) -> float | None:
         return datetime.datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except (ValueError, AttributeError):
         return None
+
+
+def _check_grace_window(conn, checks, top, env, name, live_at, start) -> None:
+    """During the grace period old pins may still serve, but only commits that were pinned once."""
+    if start <= live_at:
+        return
+    rows = conn.execute(
+        "SELECT sha, COUNT(*) AS n FROM serving WHERE env = ? AND prompt = ?"
+        " AND ts >= ? AND ts < ? GROUP BY sha",
+        (env, name, live_at, start),
+    ).fetchall()
+    if not rows:
+        return
+    from promptpin import history
+
+    try:
+        known, _ = history.known_shas(top, env, name)
+    except PromptpinError:
+        known = None
+    if known is None:
+        return  # no committed history to compare with (e.g. --no-commit deploys)
+    for r in rows:
+        if r["sha"] not in known:
+            checks.append(
+                Check(
+                    "error",
+                    env,
+                    name,
+                    f"{r['n']} request(s) in the grace period served {str(r['sha'])[:7]},"
+                    " a commit that was never pinned here",
+                )
+            )
 
 
 def verify_serving(
@@ -66,6 +99,7 @@ def verify_serving(
                 )
                 continue
             start = live_at + grace_seconds
+            _check_grace_window(conn, checks, top, env, name, live_at, start)
             if since_ts is not None:
                 start = max(start, since_ts)
             floor = start if floor is None else min(floor, start)
@@ -78,7 +112,13 @@ def verify_serving(
             total = sum(r["n"] for r in rows)
             if total == 0:
                 checks.append(
-                    Check("warning", env, name, "no requests logged since the pin went live")
+                    Check(
+                        "warning",
+                        env,
+                        name,
+                        "no requests logged since the pin went live"
+                        f" (the first {grace_seconds:g}s only count for never-pinned commits)",
+                    )
                 )
                 continue
             for r in rows:

@@ -1,0 +1,22 @@
+env: production
+bundle_digest: 217bfd98ecaf4ce305ca4fb081fde4835594f12dd483636eaf087211b11349dd
+prompts:
+  greeter:
+    sha: 975b22d115645cde50a89d1c7caa48ac5fd7c72f
+    ref: v1
+    model: gpt-4o-mini
+    params:
+      temperature: 0.7
+    format: text
+    template_sha256: c6590627a74e8995fd7d0a7e76226a48955728e11ee59a3e7cadf037ce463314
+    digest: 7d4966bcb339afa938300fe38df9ff195dfcee2a70a1f06a18e4a355120b60d6
+    file: greeter.template.md
+  support:
+    sha: 424a47550851c7a5dd3f60debba28cb312419986
+    ref: 424a47550851c7a5dd3f60debba28cb312419986
+    model: gpt-4o-mini
+    params: {}
+    format: chat
+    template_sha256: ae95a27f7b2b7ccd5ca276c325bf1402f3b13eb0c4304409b0ce0ea99d8f21d7
+    digest: b937d338eadee636d4c5bec10e47d335e7e9a5f6bc170af67608f667a0433bcb
+    file: support.template.md

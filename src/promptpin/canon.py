@@ -12,7 +12,8 @@ indentation, blank lines inside the template or any invisible/bidi character
 
 - line endings: CRLF -> LF (a lone CR is left alone; it is a validate error);
 - trailing spaces and tabs at the end of each line are removed;
-- trailing blank lines are collapsed to exactly one final newline.
+- trailing blank lines are collapsed to exactly one final newline (a text that ends in a
+  lone CR is left ending in it; ``validate`` rejects such text anyway).
 """
 
 from __future__ import annotations
@@ -23,10 +24,26 @@ import re
 _TRAILING_WS = re.compile(r"[ \t]+$", re.MULTILINE)
 
 
+def _normalise(text: str) -> str:
+    return _TRAILING_WS.sub("", text.replace("\r\n", "\n"))
+
+
 def canonical_template(text: str) -> str:
-    out = text.replace("\r\n", "\n")
-    out = _TRAILING_WS.sub("", out)
-    return out.rstrip("\n") + "\n" if out.strip("\n") else ""
+    out = _normalise(text)
+    # Stripping spaces between a lone CR and a newline can create a new CRLF
+    # (e.g. "\r \n"); repeat until stable so the result is a fixed point.
+    # Every extra pass removes at least one character, so this terminates.
+    while True:
+        again = _normalise(out)
+        if again == out:
+            break
+        out = again
+    if not out.strip("\n"):
+        return ""
+    out = out.rstrip("\n")
+    # A lone CR at the very end must not be glued to the final newline: that would
+    # create a CRLF, which a second pass would then rewrite (not idempotent).
+    return out if out.endswith("\r") else out + "\n"
 
 
 def canonical_sha256(text: str) -> str:

@@ -88,7 +88,7 @@ def test_rollback_restores_previous_sha(prompt_repo):
 
 
 def test_rollback_without_history_raises(prompt_repo):
-    with pytest.raises(DeployError, match="no previous deployment"):
+    with pytest.raises(DeployError, match="nothing to roll back"):
         deploys.rollback(prompt_repo, "classifier", "production")
 
 

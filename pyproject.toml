@@ -35,7 +35,7 @@ Changelog = "https://github.com/calasdan-sketch/promptpin/blob/HEAD/CHANGELOG.md
 promptpin = "promptpin.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "ruff>=0.1", "mypy>=1.8", "types-PyYAML"]
+dev = ["pytest>=7", "hypothesis>=6", "ruff>=0.1", "mypy>=1.8", "types-PyYAML"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

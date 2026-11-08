@@ -1,0 +1,14 @@
+{
+  "prompts": [
+    {
+      "name": "greeter",
+      "model": "gpt-4o-mini",
+      "latest": "promptpin/greeter@v2"
+    },
+    {
+      "name": "support",
+      "model": "gpt-4o-mini",
+      "latest": null
+    }
+  ]
+}

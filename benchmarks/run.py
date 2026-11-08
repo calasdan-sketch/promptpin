@@ -47,7 +47,7 @@ ENV = {
     "GIT_COMMITTER_NAME": "Bench",
     "GIT_COMMITTER_EMAIL": "bench@example.com",
 }
-KEY = b"benchmark-key-0123456789abcdef"
+KEY = b"benchmark-key-0123456789abcdef-0123456789"
 
 BASE_PROMPT = """\
 name: classifier
@@ -70,7 +70,9 @@ def git(repo: Path, *args: str) -> str:
 
 
 def commit(repo: Path, text: str, msg: str = "edit") -> str:
-    (repo / "prompts" / "classifier.yaml").write_text(text, encoding="utf-8", newline="")
+    # (Path.write_text(newline=...) needs Python 3.10+; this runs on 3.9 too)
+    with open(repo / "prompts" / "classifier.yaml", "w", encoding="utf-8", newline="") as fh:
+        fh.write(text)
     git(repo, "add", "-A")
     git(repo, "commit", "-q", "-m", msg)
     return git(repo, "rev-parse", "HEAD")

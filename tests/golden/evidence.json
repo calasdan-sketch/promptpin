@@ -1,0 +1,110 @@
+{
+  "claim_mismatches": 0,
+  "env": "production",
+  "generated_at": "2026-01-02T03:04:05Z",
+  "history": [
+    {
+      "action": "pin",
+      "claim_mismatch": false,
+      "commit": "ef20dee0565a2b7a4f7f4e3bf10cc6dd6f6eca18",
+      "commit_author": "Golden",
+      "commit_date": "2026-01-01T00:00:00+00:00",
+      "deployed_at": "2026-01-02T03:04:05Z",
+      "deployed_by": "Golden",
+      "env": "production",
+      "note": "",
+      "previous_sha": "",
+      "prompt": "support",
+      "ref": "424a47550851c7a5dd3f60debba28cb312419986",
+      "sha": "424a47550851c7a5dd3f60debba28cb312419986",
+      "signature": "N",
+      "signer": ""
+    },
+    {
+      "action": "pin",
+      "claim_mismatch": false,
+      "commit": "424a47550851c7a5dd3f60debba28cb312419986",
+      "commit_author": "Golden",
+      "commit_date": "2026-01-01T00:00:00+00:00",
+      "deployed_at": "2026-01-02T03:04:05Z",
+      "deployed_by": "Golden",
+      "env": "production",
+      "note": "",
+      "previous_sha": "",
+      "prompt": "greeter",
+      "ref": "v1",
+      "sha": "975b22d115645cde50a89d1c7caa48ac5fd7c72f",
+      "signature": "N",
+      "signer": ""
+    }
+  ],
+  "history_problems": [],
+  "hmac_sha256": "2TRq5I6oGzSHaPyiCQxu9x0tEJbrcKMQXsKgHDsQ6xo=",
+  "limits": [
+    "deployed_by and deployed_at in the lock are typed by whoever ran deploy; only the commit author, date and signature come from git.",
+    "A good commit signature shows who committed, not that the change was reviewed; use --reachable-from for the reviewed branch and CODEOWNERS for approval.",
+    "The serving log is written by the application; it shows what the app recorded.",
+    "report_sha256 detects later edits only if the hash is stored somewhere the editor cannot reach. hmac_sha256 is a shared-secret MAC: anyone with the key can also forge it."
+  ],
+  "lock_commit_signature": {
+    "code": "N",
+    "signer": ""
+  },
+  "pins": [
+    {
+      "commit_signature": "N",
+      "commit_signer": "",
+      "config_digest": "7d4966bcb339afa938300fe38df9ff195dfcee2a70a1f06a18e4a355120b60d6",
+      "deployed_at": "2026-01-02T03:04:05Z",
+      "deployed_by": "Golden",
+      "model": "gpt-4o-mini",
+      "note": "",
+      "prompt": "greeter",
+      "reachable_from_reviewed_ref": null,
+      "ref": "v1",
+      "sha": "975b22d115645cde50a89d1c7caa48ac5fd7c72f",
+      "template_sha256": "c6590627a74e8995fd7d0a7e76226a48955728e11ee59a3e7cadf037ce463314"
+    },
+    {
+      "commit_signature": "N",
+      "commit_signer": "",
+      "config_digest": "b937d338eadee636d4c5bec10e47d335e7e9a5f6bc170af67608f667a0433bcb",
+      "deployed_at": "2026-01-02T03:04:05Z",
+      "deployed_by": "Golden",
+      "model": "gpt-4o-mini",
+      "note": "",
+      "prompt": "support",
+      "reachable_from_reviewed_ref": null,
+      "ref": "424a47550851c7a5dd3f60debba28cb312419986",
+      "sha": "424a47550851c7a5dd3f60debba28cb312419986",
+      "template_sha256": "ae95a27f7b2b7ccd5ca276c325bf1402f3b13eb0c4304409b0ce0ea99d8f21d7"
+    }
+  ],
+  "promptpin_version": "<version>",
+  "repo_head": "92ffb03c578729f36a38b889e60b008efb5ba1ad",
+  "report_sha256": "a7d44cd4e4935cbf74b4afd115518b9782c5064eef4ed1637535e858b76d0f85",
+  "reviewed_ref": null,
+  "schema": "promptpin-evidence/1",
+  "serving": {
+    "checked": true,
+    "checks": [
+      {
+        "env": "production",
+        "level": "warning",
+        "message": "no requests logged since the pin went live (the first 300s only count for never-pinned commits)",
+        "prompt": "greeter"
+      },
+      {
+        "env": "production",
+        "level": "warning",
+        "message": "no requests logged since the pin went live (the first 300s only count for never-pinned commits)",
+        "prompt": "support"
+      }
+    ]
+  },
+  "verify": {
+    "errors": [],
+    "ok": true,
+    "warnings": []
+  }
+}

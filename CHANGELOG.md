@@ -72,6 +72,48 @@ Behaviour changes
 - Recommended release number: 0.3.0 (PyPI has 0.1.1; 0.2.0 was never released). Pre-1.0, so the changes listed in the 0.2.0 and
   0.3.0 notes (digests cover model/params/format, bundles must be re-exported, files over 2 MiB rejected) ship together as a breaking minor.
 
+### Round 5 (prompt-ops, release, signing and audit review)
+Fixed
+- `rollback` only worked on the machine that made the deploy (it read the local ledger, which is empty on a fresh clone
+  or a CI runner). It now finds the previous pin in the git history of `promptpin.lock`, falling back to the ledger.
+  Its "(was ...)" line printed the target commit twice; it now shows the pin that was replaced.
+- `history` and `audit` showed nothing on a fresh clone. They now read the git history of `promptpin.lock` (author, date,
+  signature per deploy); `history --source ledger` keeps the old view.
+- Two `deploy` processes at the same time could fail with git's own "index.lock" error after changing the lock: the commit
+  now happens while the deploy mutex is held (18 parallel deploys: 0 failures).
+- `log verify` skipped everything in the grace period after a deploy. During the grace period it still reports any request
+  that used a commit that was never pinned for that prompt in that env.
+- `auto_commit_deploys: false` in `promptpin.yaml` was ignored by the CLI (`deploy` always committed unless `--no-commit`
+  was given), although the README says to set it false in CI. `deploy` and `promote` now follow the config.
+- Attestation envelopes with a non-canonical base64 spelling of the same signed bytes are rejected.
+- `benchmarks/run.py` (and so `tests/test_benchmark.py`) crashed on Python 3.9 (`Path.write_text(newline=...)` is 3.10+);
+  the whole suite now passes on 3.9, 3.12 and 3.13.
+- `canon.canonical_template` was not idempotent for text with a lone carriage return (found by a property test); it is now.
+- A commit whose author name contained a field separator or U+2028 could drop out of a naive git-log parse; the new
+  history parser uses a random separator (test added).
+Added
+- `promptpin promote NAME --from ENV --to ENV`: pin exactly what another env has pinned; refuses if the source pin fails
+  `verify` or its release tag no longer points at the pinned commit.
+- `promptpin evidence --env ENV [--format md|json] [--reachable-from REF] [--require-signed] [--sign]` and
+  `evidence-verify`: one auditor-facing record rebuilt from git (pins, signature status, deploy history with commit
+  author versus the lock's `deployed_by`, serving-log findings, a list of what it does not prove), self-hashed, optionally HMAC-signed.
+- `attest` records `created_at`; `attest-verify --max-age 7d` rejects old, future-dated or undated attestations.
+- `--json` on `history`, `audit`, `log stats` and `log verify`; `--limit` must be 1 or more.
+- `promptpin.__author__`; tests that pin the author string.
+- Tests: Hypothesis property tests (skipped if Hypothesis is not installed), golden files for every output format,
+  fixtures made by the real published 0.1.1, and `benchmarks/mutation_check.py` (20 deliberate breakages, all caught).
+Behaviour changes
+- Attestation keys must be at least 32 bytes (was 16) and have at least 8 different byte values. The attestation feature
+  has not been released, so nothing published is affected; new key: `python -c "import secrets; print(secrets.token_hex(32))"`.
+- `history` prefers git history over the ledger (`--source auto`); deploys made with `--no-commit` appear only with `--source ledger`.
+- Deploy notes made by `rollback` read "rollback to <ref>" (was "rollback from").
+Upgrading from the published 0.1.1 (checked with the real wheel)
+- A 0.1.1 `promptpin.lock` still loads and `verify` passes with one warning per pin ("pin has no digest - redeploy it").
+  Re-running `promptpin deploy NAME@REF --env ENV` for each pin clears it.
+- A 0.1.1 `export`ed bundle is refused with "re-export the bundle" (its manifest has no config digest).
+- A 0.1.1 `.promptpin/state.db` works unchanged; the serving table gains two columns in place.
+- Eval scores recorded by 0.1.1 are still shown by `evals` and `diff`.
+
 ### Compatibility
 - Pins, lock files and bundles from 0.2.0 stay valid. Existing serving databases are migrated in place.
 

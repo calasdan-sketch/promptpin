@@ -7,6 +7,7 @@ no vendor database, nothing on the request hot path.
 """
 
 __version__ = "0.3.0"
+__author__ = "Calas Automations Inc."
 
 from promptpin.client import (
     load_bundle,
@@ -22,6 +23,7 @@ __all__ = [
     "PinnedPrompts",
     "PromptIntegrityError",
     "Receipt",
+    "__author__",
     "__version__",
     "load_bundle",
     "log_serve",

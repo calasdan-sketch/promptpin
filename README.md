@@ -22,6 +22,8 @@ promptpin verify                       # CI gate: every pin re-derived from git
 > `pip install "git+https://github.com/calasdan-sketch/promptpin"`. Python 3.9+ and one dependency (PyYAML);
 > `promptpin --version` shows what you have. Tested on Linux only (see Limitations).
 
+Maintained by Calas Automations Inc. (MIT licence).
+
 ## What a reviewer can't see, promptpin can
 
 Bidi overrides ("Trojan Source"), zero-width characters and invisible Unicode
@@ -100,6 +102,25 @@ promptpin review --base origin/main                      # plain-language Markdo
   changed: params.temperature", "Whitespace-only change", warns about invisible characters, and prints the
   undo command. Prompt text is escaped and fenced. `promptpin diff` also flags whitespace-only changes.
 
+### Evidence for an auditor (new in 0.3)
+
+```bash
+promptpin evidence --env production --reachable-from origin/main --out evidence.json
+# add --format md for a readable page, --sign (shared key) to add an HMAC
+promptpin evidence-verify evidence.json --expect-sha256 <hash you stored when it was made>
+```
+
+The report is rebuilt from git each time (not from the local ledger): what is pinned now and whether
+each pin still matches its source, the signature status of the pinned commits, every deploy from
+`git log` of `promptpin.lock` with the commit's author, date and signature, and the `log verify` result when
+a serving log exists. It flags deploys where the lock's `deployed_by` text differs from the git author,
+because that field is typed by whoever ran `deploy` and is not signed on its own. The report states
+what it does not prove; read that section before handing it to anyone. Its SHA-256 only detects edits if
+you store the hash somewhere the editor cannot reach; the HMAC is a shared-secret MAC, not a public-key
+signature. `attest` now records `created_at`, and `attest-verify --max-age 7d` rejects stale or
+undated attestations. Attestation keys must be at least 32 bytes and not repetitive:
+`python -c "import secrets; print(secrets.token_hex(32))"`.
+
 GitHub Actions sketch (run on pull requests, full fetch):
 
 ```yaml
@@ -171,7 +192,8 @@ Checked November 2026.
 | Version | Git commit SHA (the truth); human name = tag `promptpin/<name>@v3` |
 | Release | `promptpin release <name>` creates the next version tag |
 | Deploy | `promptpin deploy <name>@v3 --env production` pins the resolved SHA into the committed `promptpin.lock` |
-| Rollback | `promptpin rollback <name> --env production` re-pins the previous SHA |
+| Rollback | `promptpin rollback <name> --env production` re-pins the previous SHA (found in the git history of `promptpin.lock`, so it works on a fresh clone or in CI) |
+| Promote | `promptpin promote <name> --from staging --to production` copies exactly the staging pin; refuses if it fails `verify` or its tag moved |
 | Serving | App loads a `promptpin export` bundle; logs which SHA served each request |
 | Verify | `promptpin verify` re-derives every pin from git and fails on any mismatch |
 
@@ -239,11 +261,12 @@ promptpin list                        # prompts + latest released version
 promptpin versions classifier          # all released versions
 promptpin show classifier@v2 --var ticket_text="login broken"
 promptpin status                      # what's pinned where (--json for scripts; so does `list`)
-promptpin history --env production    # deploy ledger
+promptpin history --env production    # who deployed what, from git history of promptpin.lock (--json; --source ledger = this machine only)
 promptpin validate                    # schema, variables, hidden chars, look-alike letters, secrets (exit 1 on error)
 promptpin validate --strict --json    # warnings fail too; machine-readable
 promptpin verify --env production     # lock file vs git: hashes, SHAs, tags, envs
-promptpin audit --prompt classifier   # git history + deploys: who changed what
+promptpin audit --prompt classifier   # git history + deploys: who changed what (--json)
+promptpin evidence --env production --format md --out evidence.md   # one record for an auditor (below)
 promptpin lock --env production --out manifest.yaml   # minimal runtime manifest
 ```
 
@@ -347,10 +370,12 @@ evals, serving log) and the deploy mutex.
 - **Serving log has no automatic rotation.** Use `log_sample_rate < 1` and
   `promptpin log prune --older-than 30d`. At 1.0 sampling and high traffic,
   `state.db` will grow — plan retention consciously.
-- **The deploy ledger is local.** `history`/`rollback` see deploys made on
-  *this* machine (`.promptpin/state.db`). The committed `promptpin.lock` is
-  the cross-machine source of truth; rollback across machines means deploying
-  the SHA you see in `status`.
+- **The local ledger is per machine; the deploy history is not.** `history`, `audit`, `rollback`,
+  `promote`, `evidence` and the `log verify` grace check read the git history of `promptpin.lock`, so they agree
+  on every clone. Only deploys made with `--no-commit` (never committed) exist solely in
+  `.promptpin/state.db`; `history --source ledger` shows those. The history needs the commits of
+  `promptpin.lock`: a shallow clone (`--depth 1`) sees only the newest. `deployed_by` in the lock is
+  unsigned text; the commit's author and signature are the evidence.
 - **Cross-machine same-env deploy races** resolve via git merge on
   `promptpin.lock`, not via locking. Different-env concurrent deploys merge
   cleanly; same-env conflicts surface as a normal merge conflict.

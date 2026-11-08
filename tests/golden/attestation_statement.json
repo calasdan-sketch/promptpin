@@ -1,0 +1,45 @@
+{
+  "_type": "https://in-toto.io/Statement/v1",
+  "predicate": {
+    "bundle_digest": "217bfd98ecaf4ce305ca4fb081fde4835594f12dd483636eaf087211b11349dd",
+    "created_at": "2026-01-02T03:04:05Z",
+    "env": "production",
+    "lock_sha256": "c8409e8d3748da3a10b5e06417695ec064574ba3b6d2a6ddb9b1b588039a8920",
+    "prompts": {
+      "greeter": {
+        "digest": "7d4966bcb339afa938300fe38df9ff195dfcee2a70a1f06a18e4a355120b60d6",
+        "format": "text",
+        "model": "gpt-4o-mini",
+        "params": {
+          "temperature": 0.7
+        },
+        "ref": "v1",
+        "sha": "975b22d115645cde50a89d1c7caa48ac5fd7c72f"
+      },
+      "support": {
+        "digest": "b937d338eadee636d4c5bec10e47d335e7e9a5f6bc170af67608f667a0433bcb",
+        "format": "chat",
+        "model": "gpt-4o-mini",
+        "params": {},
+        "ref": "424a47550851c7a5dd3f60debba28cb312419986",
+        "sha": "424a47550851c7a5dd3f60debba28cb312419986"
+      }
+    },
+    "repo_head": "92ffb03c578729f36a38b889e60b008efb5ba1ad"
+  },
+  "predicateType": "urn:promptpin:attestation:v1",
+  "subject": [
+    {
+      "digest": {
+        "sha256": "c6590627a74e8995fd7d0a7e76226a48955728e11ee59a3e7cadf037ce463314"
+      },
+      "name": "prompt/greeter"
+    },
+    {
+      "digest": {
+        "sha256": "ae95a27f7b2b7ccd5ca276c325bf1402f3b13eb0c4304409b0ce0ea99d8f21d7"
+      },
+      "name": "prompt/support"
+    }
+  ]
+}

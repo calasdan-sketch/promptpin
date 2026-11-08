@@ -26,7 +26,9 @@ from promptpin.errors import PromptpinError
 PAYLOAD_TYPE = "application/vnd.in-toto+json"
 STATEMENT_TYPE = "https://in-toto.io/Statement/v1"
 PREDICATE_TYPE = "urn:promptpin:attestation:v1"
-MIN_KEY_BYTES = 16
+MIN_KEY_BYTES = 32
+MIN_DISTINCT_BYTES = 8
+MAX_CLOCK_SKEW_SECONDS = 300.0
 
 
 class AttestationError(PromptpinError):
@@ -45,7 +47,12 @@ def keyid(key: bytes) -> str:
 
 def _check_key(key: bytes) -> bytes:
     if not isinstance(key, (bytes, bytearray)) or len(key) < MIN_KEY_BYTES:
-        raise AttestationError(f"signing key must be at least {MIN_KEY_BYTES} bytes")
+        raise AttestationError(
+            f"signing key must be at least {MIN_KEY_BYTES} bytes - make one with:"
+            ' python -c "import secrets; print(secrets.token_hex(32))"'
+        )
+    if len(set(key)) < MIN_DISTINCT_BYTES:
+        raise AttestationError("signing key is too repetitive to be a real secret")
     return bytes(key)
 
 
@@ -88,6 +95,7 @@ def build_statement(repo_root: Path, env: str) -> dict:
         "predicate": {
             "env": env,
             "bundle_digest": bundle,
+            "created_at": deploys._utc_iso(),
             "lock_sha256": hashlib.sha256(lock_bytes).hexdigest(),
             "repo_head": gitutil.head_sha(top),
             "prompts": entries,
@@ -117,6 +125,13 @@ def open_envelope(envelope: object, key: bytes) -> dict:
         sigs = [base64.b64decode(s["sig"], validate=True) for s in envelope["signatures"]]
     except (KeyError, TypeError, ValueError):
         raise AttestationError("malformed attestation envelope") from None
+    # Base64 can encode the same bytes in more than one way (stray bits in the last
+    # character). Accept only the canonical text, so one signed payload has one file form.
+    if base64.b64encode(payload).decode("ascii") != envelope["payload"] or any(
+        base64.b64encode(raw).decode("ascii") != s["sig"]
+        for raw, s in zip(sigs, envelope["signatures"])
+    ):
+        raise AttestationError("malformed attestation envelope (non-canonical base64)")
     want = hmac.new(key, _pae(PAYLOAD_TYPE, payload), hashlib.sha256).digest()
     if not any(hmac.compare_digest(want, s) for s in sigs):
         raise AttestationError("attestation signature does not match the key")
@@ -164,3 +179,21 @@ def check_against_repo(repo_root: Path, statement: dict, env: str | None = None)
         elif current["bundle_digest"] != pred.get("bundle_digest"):
             problems.append("bundle digest differs from the attested one")
     return problems
+
+
+def check_freshness(statement: dict, max_age_seconds: float, now: float | None = None) -> list[str]:
+    """Problems with the attestation's age. An attestation with no valid timestamp fails closed."""
+    import datetime
+    import time
+
+    created = statement["predicate"].get("created_at")
+    try:
+        when = datetime.datetime.fromisoformat(str(created).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return ["attestation has no valid created_at, so its age cannot be checked"]
+    age = (time.time() if now is None else now) - when
+    if age < -MAX_CLOCK_SKEW_SECONDS:
+        return [f"attestation is dated in the future ({created})"]
+    if age > max_age_seconds:
+        return [f"attestation is {int(age // 3600)}h old, older than the allowed maximum"]
+    return []
